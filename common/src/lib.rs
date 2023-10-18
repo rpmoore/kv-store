@@ -1,3 +1,7 @@
+pub mod storage {
+    tonic::include_proto!("storage"); // The string specified here must match the proto package name
+}
+
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }

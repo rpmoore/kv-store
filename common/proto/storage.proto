@@ -1,0 +1,35 @@
+syntax = "proto3";
+package storage;
+
+import "google/protobuf/timestamp.proto";
+
+message PutRequest {
+  bytes key = 1;
+  bytes value = 2;
+  optional int32 crc = 3;
+}
+
+message PutResponse {
+  uint32 version = 1;
+  int32 crc = 2;
+  google.protobuf.Timestamp creationTime = 3;
+}
+
+message GetRequest {
+  bytes key = 1;
+  optional uint32 version = 2;
+}
+
+message GetResponse {
+  bytes key = 1;
+  bytes value = 2;
+  google.protobuf.Timestamp creationTime = 3;
+  uint32 version = 4;
+  int32 crc = 5;
+}
+
+
+service Storage {
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+}
