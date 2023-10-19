@@ -6,12 +6,12 @@ import "google/protobuf/timestamp.proto";
 message PutRequest {
   bytes key = 1;
   bytes value = 2;
-  optional int32 crc = 3;
+  optional uint32 crc = 3;
 }
 
 message PutResponse {
   uint32 version = 1;
-  int32 crc = 2;
+  uint32 crc = 2;
   google.protobuf.Timestamp creationTime = 3;
 }
 
@@ -25,7 +25,7 @@ message GetResponse {
   bytes value = 2;
   google.protobuf.Timestamp creationTime = 3;
   uint32 version = 4;
-  int32 crc = 5;
+  uint32 crc = 5;
 }
 
 
