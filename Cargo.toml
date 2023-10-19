@@ -1,23 +1,10 @@
-[package]
-name = "kv-store"
-version = "0.1.0"
-edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-jumphash = "0.1.8"
+[workspace.dependencies]
 prost = "0.12.1"
 prost-types = "0.12.1"
 tonic = "0.10.2"
 
 [workspace]
 members = ["storage", "common", "kvstore"]
-
-[[bin]]
-name = "storage"
-path = "storage/src/main.rs"
-
-[[bin]]
-name = "kvstore"
-path = "kvstore/src/main.rs"
+resolver = "2"
