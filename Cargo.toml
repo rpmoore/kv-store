@@ -4,6 +4,7 @@
 prost = "0.12.1"
 prost-types = "0.12.1"
 tonic = "0.10.2"
+tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"]}
 
 [workspace]
 members = ["storage", "common", "kvstore"]
