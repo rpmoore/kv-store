@@ -14,7 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(StorageServer::new(server))
         .serve(addr)
         .await?;
-
     Ok(())
 }
 

@@ -5,13 +5,37 @@ use actix_web::{Responder, web, HttpServer, App, put, HttpResponse, body::BoxBod
 use actix_web::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
+use std::sync::Mutex;
+use crate::MainErrors::{IoError, TonicError};
+
+#[derive(Error, Debug, Display)]
+enum MainErrors {
+    #[display(fmt="io error")]
+    IoError(std::io::Error),
+    #[display(fmt="tonic error")]
+    TonicError(tonic::transport::Error)
+}
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().service(put))
-        .bind(("0.0.0.0", 8080))?
-        .run()
-        .await
+async fn main() -> Result<(), MainErrors> {
+
+    let result = StorageClient::connect("http://[::1]:50051").await;
+
+    let client = match result {
+        Ok(client) => client,
+        Err(err) => return Err(TonicError(err)),
+    };
+
+    let app_data = web::Data::new(AppData{client});
+
+    HttpServer::new(move || App::new().app_data(app_data.clone()).service(put))
+        .bind(("0.0.0.0", 8080)).unwrap()
+        .run().await.map_err(|err|IoError(err))
+
+}
+
+struct AppData {
+    client: StorageClient<tonic::transport::Channel>
 }
 
 #[derive(Deserialize)]
@@ -65,15 +89,13 @@ impl error::ResponseError for KVErrors {
 }
 
 #[put("/key/{id}")]
-async fn put(path: web::Path<String>, data: web::Json<PutValue>) -> Result<impl Responder, KVErrors> {
+async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web::Data<AppData>) -> Result<impl Responder, KVErrors> {
     let id = path.into_inner();
 
-    let result = StorageClient::connect("http://[::1]:50051").await;
-
-    let mut client = match result {
-        Ok(client) => client,
-        Err(_) => return Err(KVErrors::ServiceUnavailable),
+    let mut client = {
+        app_data.client.clone() // clone to avoid race conditions
     };
+
 
     let value = data.into_inner();
 
