@@ -1,12 +1,14 @@
-use common::storage::{storage_client::StorageClient, PutRequest};
+use common::storage::{PutRequest, storage_client::StorageClient};
 use tonic;
 use actix_web;
-use actix_web::{Responder, web, HttpServer, App, put, HttpResponse, body::BoxBody, HttpRequest, http::header::ContentType, error};
+use actix_web::{App, body::BoxBody, error, http::header::ContentType, HttpRequest, HttpResponse, HttpServer, put, Responder, web};
 use actix_web::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
-use std::sync::Mutex;
+use crate::connections::ConnectionManager;
 use crate::MainErrors::{IoError, TonicError};
+
+mod connections;
 
 #[derive(Error, Debug, Display)]
 enum MainErrors {
@@ -26,16 +28,18 @@ async fn main() -> Result<(), MainErrors> {
         Err(err) => return Err(TonicError(err)),
     };
 
-    let app_data = web::Data::new(AppData{client});
+    let mut connection_manager = connections::ConnectionManager::default();
+    connection_manager.new_conn(client);
+
+    let app_data = web::Data::new(AppData{connection_manager});
 
     HttpServer::new(move || App::new().app_data(app_data.clone()).service(put))
         .bind(("0.0.0.0", 8080)).unwrap()
         .run().await.map_err(|err|IoError(err))
-
 }
 
 struct AppData {
-    client: StorageClient<tonic::transport::Channel>
+    connection_manager: ConnectionManager,
 }
 
 #[derive(Deserialize)]
@@ -93,9 +97,8 @@ async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web:
     let id = path.into_inner();
 
     let mut client = {
-        app_data.client.clone() // clone to avoid race conditions
+        app_data.connection_manager.get_conn(0).unwrap().clone() // clone to avoid race conditions
     };
-
 
     let value = data.into_inner();
 
