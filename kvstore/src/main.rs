@@ -5,8 +5,17 @@ use actix_web::{App, body::BoxBody, error, http::header::ContentType, HttpReques
 use actix_web::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
+use tonic::transport::Channel;
+use tower::ServiceBuilder;
 use crate::connections::ConnectionManager;
 use crate::MainErrors::{IoError, TonicError};
+use tracing_subscriber;
+use tracing_actix_web;
+use tracing_actix_web::TracingLogger;
+use tracing::{info, error, Level, Subscriber};
+use tracing_attributes::instrument;
+use tracing_subscriber::fmt::FormatFields;
+use tracing_subscriber::Layer;
 
 mod connections;
 
@@ -21,28 +30,34 @@ enum MainErrors {
 #[actix_web::main]
 async fn main() -> Result<(), MainErrors> {
 
-    let result = StorageClient::connect("http://[::1]:50051").await;
+    tracing_subscriber::fmt()
+        .json()
+        .with_max_level(Level::INFO)
+        .with_target(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .init();
 
-    let client = match result {
-        Ok(client) => client,
-        Err(err) => return Err(TonicError(err)),
-    };
+    let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
+
+    let client = StorageClient::new(channel);
 
     let mut connection_manager = connections::ConnectionManager::default();
     connection_manager.new_conn(client);
 
     let app_data = web::Data::new(AppData{connection_manager});
 
-    HttpServer::new(move || App::new().app_data(app_data.clone()).service(put))
+    HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default()).service(put))
         .bind(("0.0.0.0", 8080)).unwrap()
         .run().await.map_err(|err|IoError(err))
 }
 
+#[derive(Debug)]
 struct AppData {
     connection_manager: ConnectionManager,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct PutValue {
     value: String,
     crc: Option<u32>,
@@ -92,6 +107,7 @@ impl error::ResponseError for KVErrors {
     }
 }
 
+#[instrument]
 #[put("/key/{id}")]
 async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web::Data<AppData>) -> Result<impl Responder, KVErrors> {
     let id = path.into_inner();
@@ -101,16 +117,19 @@ async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web:
     };
 
     let value = data.into_inner();
-
+    info!(key = id, "putting new key");
     let request = tonic::Request::new(PutRequest {
-        key: id.into_bytes(),
+        key: id.clone().into_bytes(),
         value: value.value.into_bytes(),
         crc: value.crc,
     });
 
     let put_response = match client.put(request).await {
         Ok(response) => response.into_inner(),
-        Err(_) => return Err(KVErrors::InternalServerError)
+        Err(err) => {
+            error!(key = id, err = err.to_string(), "failed to put value");
+            return Err(KVErrors::InternalServerError)
+        }
     };
 
     Ok(PutResp{
