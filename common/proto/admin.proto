@@ -1,0 +1,25 @@
+syntax = "proto3";
+package admin;
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+message StorageServer {
+  string id = 1;
+  google.protobuf.Timestamp added_at = 2;
+  uint32 num_partitions = 3;
+  string uri = 4;
+}
+
+message ListStorageServersResp {
+  repeated StorageServer servers = 1;
+}
+
+message AddStorageServerRequest {
+  string id = 1;
+  string uri = 2;
+}
+
+service Admin {
+  rpc ListStorageServers(google.protobuf.Empty) returns (ListStorageServersResp);
+  rpc AddStorageServer(AddStorageServerRequest) returns (google.protobuf.Empty);
+}

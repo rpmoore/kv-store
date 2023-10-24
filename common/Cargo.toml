@@ -10,6 +10,9 @@ jumphash = "0.1.8"
 prost = {workspace = true}
 prost-types = {workspace = true}
 tonic = {workspace = true}
+actix-web = "4.4.0"
+serde = { version = "1.0.189", features = ["derive"] }
+tracing-actix-web = {workspace = true}
 
 [build-dependencies]
 tonic-build = "0.10.2"

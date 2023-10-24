@@ -6,7 +6,6 @@ use actix_web::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
-use tower::ServiceBuilder;
 use crate::connections::ConnectionManager;
 use crate::MainErrors::{IoError, TonicError};
 use tracing_subscriber;
@@ -16,6 +15,7 @@ use tracing::{info, error, Level, Subscriber};
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::Layer;
+use futures::try_join;
 
 mod connections;
 
@@ -47,9 +47,13 @@ async fn main() -> Result<(), MainErrors> {
 
     let app_data = web::Data::new(AppData{connection_manager});
 
-    HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default()).service(put))
+    let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
+
+    let server =  HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default()).service(put))
         .bind(("0.0.0.0", 8080)).unwrap()
-        .run().await.map_err(|err|IoError(err))
+        .run();
+
+    try_join!(healthcheck, server).map(|_,_| ()).map_err(|err|IoError(err))
 }
 
 #[derive(Debug)]

@@ -17,3 +17,4 @@ tracing-subscriber = {workspace = true, features = ["json"]}
 tracing-actix-web = {workspace = true}
 tracing-attributes = "0.1.27"
 tower = { version = "0.4.13", features = ["tracing", "reconnect", "retry"] }
+futures = "0.3.28"
