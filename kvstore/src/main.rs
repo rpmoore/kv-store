@@ -53,7 +53,7 @@ async fn main() -> Result<(), MainErrors> {
         .bind(("0.0.0.0", 8080)).unwrap()
         .run();
 
-    try_join!(healthcheck, server).map(|_,_| ()).map_err(|err|IoError(err))
+    try_join!(healthcheck, server).map(|(_,_)| ()).map_err(|err|IoError(err))
 }
 
 #[derive(Debug)]
