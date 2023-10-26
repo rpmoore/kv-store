@@ -2,12 +2,10 @@ use std::io::{Error, ErrorKind};
 use common::storage::{PutRequest, storage_client::StorageClient};
 use tonic;
 use std::fmt;
-use std::fmt::Formatter;
 use actix_web;
 use actix_web::{App, body::BoxBody, error, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, put, post, get, delete, Responder, web, http::header, HttpMessage};
-use actix_web::error::ParseError;
 use actix_web::http::StatusCode;
-use actix_web::http::header::{HeaderName, HeaderValue, InvalidHeaderValue, TryIntoHeaderValue};
+use actix_web::http::header::{TryIntoHeaderValue};
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
@@ -20,6 +18,7 @@ use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::Layer;
 use futures::try_join;
+use tonic::Extensions;
 use common::auth::{JwtIssuer, RsaJwtIssuer};
 use uuid::Uuid;
 
@@ -52,52 +51,14 @@ async fn main() -> Result<(), Error> {
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
 
-    let server =  HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default()).service(put))
+    let server =  HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default())
+        .service(put)
+        .service(gen_token)
+    )
         .bind(("0.0.0.0", 8080)).unwrap()
         .run();
 
     try_join!(healthcheck, server).map(|(_,_)| ())
-}
-
-struct AuthHeader {
-    bearer: String
-}
-
-impl fmt::Debug for AuthHeader {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("auth header")
-    }
-}
-
-impl TryIntoHeaderValue for AuthHeader {
-    type Error = InvalidHeaderValue;
-
-    fn try_into_value(self) -> Result<HeaderValue, Self::Error> {
-        HeaderValue::try_from(format!("Bearer {}", self.bearer))
-    }
-}
-
-impl header::Header for AuthHeader {
-    fn name() -> HeaderName {
-        header::AUTHORIZATION
-    }
-
-    fn parse<M: HttpMessage>(msg: &M) -> Result<Self, ParseError> {
-        match msg.headers().get(header::AUTHORIZATION) {
-            Some(auth_header) => match auth_header.to_str().map_err(|err| {
-                error!(err = err.to_string(), "failed to get auth header");
-                ParseError::Header
-            }
-            ).and_then(|value| value.split_ascii_whitespace().skip(1).next().ok_or(ParseError::Header)) {
-                Ok(auth) => Ok(AuthHeader{bearer: String::from(auth)}),
-                Err(err)=> {
-                    error!{err = err.to_string(), "failed to get auth header"}
-                    Err(ParseError::Header)
-                }
-            },
-            None => Err(ParseError::Header)
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -171,10 +132,11 @@ async fn gen_token(app_data: web::Data<AppData>) -> Result<impl Responder, Box<d
 
 #[instrument]
 #[put("/namespace/{namespace}/keys/{id}")]
-async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
     let (namespace, id) = path.into_inner();
 
     // grab identity from headers
+    let metadata = auth_data.into_inner().into();
 
     let mut client = {
         app_data.connection_manager.get_conn(0).unwrap().clone() // clone to avoid race conditions
@@ -182,7 +144,8 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
 
     let value = data.into_inner();
     info!(key = id, "putting new key");
-    let request = tonic::Request::new(PutRequest {
+
+    let request = tonic::Request::from_parts(metadata, Extensions::default(),PutRequest {
         namespace: namespace.to_owned(),
         key: id.clone().into_bytes(),
         value: value.value.into_bytes(),

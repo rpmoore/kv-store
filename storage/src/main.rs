@@ -1,14 +1,23 @@
 use std::time::SystemTime;
 use prost_types::Timestamp;
 use common::storage::{storage_server::Storage, storage_server::StorageServer, PutRequest, PutResponse, GetRequest, GetResponse, CreateNamespaceRequest, DeleteNamespaceRequest, DeleteRequest, MigrateToNewNodeRequest};
-use common::auth::{Identity, RsaJwtValidator};
+use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{transport::Server, Request, Response, Status, Code};
 use tokio;
+use tracing::{error, info, Level};
 use tracing_attributes::instrument;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .json()
+        .with_max_level(Level::INFO)
+        .with_target(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .init();
+
     let addr = "[::1]:50051".parse()?;
 
     let private_key = read_file_bytes("key.pub.pem")?;
@@ -49,6 +58,24 @@ impl Storage for NodeStorageServer {
     }
 
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
+        let auth_header = match common::auth::AuthHeader::try_from(request.metadata()) {
+            Ok(header) => header,
+            Err(err) => {
+                error!(err = err.to_string(), "invalid auth header");
+                return Err(Status::new(Code::Unauthenticated, "auth header missing"))
+            }
+        };
+
+        let identity = match self.jwt_validator.clone().parse(auth_header.as_ref()) {
+            Ok(id) => id,
+            Err(err) => {
+                error!(err = err.to_string(), "invalid auth header");
+                return Err(Status::new(Code::NotFound, "not found"))
+            }
+        };
+
+        info!(tenant_id = identity.tenant_id().unwrap().to_string(), "authenticated as tenant");
+
         println!("got request to put data");
         let response = PutResponse {
             version: 1,
