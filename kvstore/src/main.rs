@@ -1,13 +1,17 @@
+use std::io::{Error, ErrorKind};
 use common::storage::{PutRequest, storage_client::StorageClient};
 use tonic;
+use std::fmt;
+use std::fmt::Formatter;
 use actix_web;
-use actix_web::{App, body::BoxBody, error, http::header::ContentType, HttpRequest, HttpResponse, HttpServer, put, Responder, web};
+use actix_web::{App, body::BoxBody, error, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, put, post, get, delete, Responder, web, http::header, HttpMessage};
+use actix_web::error::ParseError;
 use actix_web::http::StatusCode;
+use actix_web::http::header::{HeaderName, HeaderValue, InvalidHeaderValue, TryIntoHeaderValue};
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
 use crate::connections::ConnectionManager;
-use crate::MainErrors::{IoError, TonicError};
 use tracing_subscriber;
 use tracing_actix_web;
 use tracing_actix_web::TracingLogger;
@@ -16,20 +20,13 @@ use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::Layer;
 use futures::try_join;
+use common::auth::{JwtIssuer, RsaJwtIssuer};
+use uuid::Uuid;
 
 mod connections;
 
-#[derive(Error, Debug, Display)]
-enum MainErrors {
-    #[display(fmt="io error")]
-    IoError(std::io::Error),
-    #[display(fmt="tonic error")]
-    TonicError(tonic::transport::Error)
-}
-
 #[actix_web::main]
-async fn main() -> Result<(), MainErrors> {
-
+async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .json()
         .with_max_level(Level::INFO)
@@ -38,6 +35,12 @@ async fn main() -> Result<(), MainErrors> {
         .with_file(true)
         .init();
 
+    let private_key = common::read_file_bytes("key.pem")?;
+    let issuer = RsaJwtIssuer::new(private_key.as_slice()).map_err(|err| {
+        error!{err = err.to_string(), "failed to parse key"};
+        ErrorKind::InvalidData
+    })?;
+
     let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
 
     let client = StorageClient::new(channel);
@@ -45,7 +48,7 @@ async fn main() -> Result<(), MainErrors> {
     let mut connection_manager = connections::ConnectionManager::default();
     connection_manager.new_conn(client);
 
-    let app_data = web::Data::new(AppData{connection_manager});
+    let app_data = web::Data::new(AppData{connection_manager, jwt_issuer: issuer});
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
 
@@ -53,12 +56,54 @@ async fn main() -> Result<(), MainErrors> {
         .bind(("0.0.0.0", 8080)).unwrap()
         .run();
 
-    try_join!(healthcheck, server).map(|(_,_)| ()).map_err(|err|IoError(err))
+    try_join!(healthcheck, server).map(|(_,_)| ())
+}
+
+struct AuthHeader {
+    bearer: String
+}
+
+impl fmt::Debug for AuthHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("auth header")
+    }
+}
+
+impl TryIntoHeaderValue for AuthHeader {
+    type Error = InvalidHeaderValue;
+
+    fn try_into_value(self) -> Result<HeaderValue, Self::Error> {
+        HeaderValue::try_from(format!("Bearer {}", self.bearer))
+    }
+}
+
+impl header::Header for AuthHeader {
+    fn name() -> HeaderName {
+        header::AUTHORIZATION
+    }
+
+    fn parse<M: HttpMessage>(msg: &M) -> Result<Self, ParseError> {
+        match msg.headers().get(header::AUTHORIZATION) {
+            Some(auth_header) => match auth_header.to_str().map_err(|err| {
+                error!(err = err.to_string(), "failed to get auth header");
+                ParseError::Header
+            }
+            ).and_then(|value| value.split_ascii_whitespace().skip(1).next().ok_or(ParseError::Header)) {
+                Ok(auth) => Ok(AuthHeader{bearer: String::from(auth)}),
+                Err(err)=> {
+                    error!{err = err.to_string(), "failed to get auth header"}
+                    Err(ParseError::Header)
+                }
+            },
+            None => Err(ParseError::Header)
+        }
+    }
 }
 
 #[derive(Debug)]
 struct AppData {
     connection_manager: ConnectionManager,
+    jwt_issuer: RsaJwtIssuer,
 }
 
 #[derive(Deserialize, Debug)]
@@ -111,10 +156,25 @@ impl error::ResponseError for KVErrors {
     }
 }
 
+#[derive(Serialize, Debug)]
+struct GenTokenResponse {
+    token: String
+}
+
 #[instrument]
-#[put("/key/{id}")]
-async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web::Data<AppData>) -> Result<impl Responder, KVErrors> {
-    let id = path.into_inner();
+#[post("/tokens")]
+async fn gen_token(app_data: web::Data<AppData>) -> Result<impl Responder, Box<dyn std::error::Error>> {
+    let issuer = app_data.jwt_issuer.clone();
+    let token = issuer.new_identity(Uuid::new_v4())?;
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse{token:token.token()}))
+}
+
+#[instrument]
+#[put("/namespace/{namespace}/keys/{id}")]
+async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<AuthHeader>) -> Result<impl Responder, KVErrors> {
+    let (namespace, id) = path.into_inner();
+
+    // grab identity from headers
 
     let mut client = {
         app_data.connection_manager.get_conn(0).unwrap().clone() // clone to avoid race conditions
@@ -123,6 +183,7 @@ async fn put(path: web::Path<String>, data: web::Json<PutValue>, app_data : web:
     let value = data.into_inner();
     info!(key = id, "putting new key");
     let request = tonic::Request::new(PutRequest {
+        namespace: namespace.to_owned(),
         key: id.clone().into_bytes(),
         value: value.value.into_bytes(),
         crc: value.crc,

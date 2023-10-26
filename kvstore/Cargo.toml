@@ -8,13 +8,14 @@ edition = "2021"
 [dependencies]
 common = {path="../common"}
 tonic = {workspace = true, features = ["transport"]}
-actix-web = "4.4.0"
-serde = { version = "1.0.189", features = ["derive"] }
-serde_json = "1.0.107"
-derive_more = "0.99.17"
+actix-web = {workspace = true}
+serde = { workspace = true }
+serde_json = {workspace = true}
+derive_more = {workspace = true}
 tracing = {workspace = true}
-tracing-subscriber = {workspace = true, features = ["json"]}
+tracing-subscriber = {workspace = true}
 tracing-actix-web = {workspace = true}
-tracing-attributes = "0.1.27"
-tower = { version = "0.4.13", features = ["tracing", "reconnect", "retry"] }
-futures = "0.3.28"
+tracing-attributes = {workspace = true}
+#tower = { version = "0.4.13", features = ["tracing", "reconnect", "retry"] }
+futures = {workspace = true}
+uuid = {workspace = true}

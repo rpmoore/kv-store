@@ -2,11 +2,15 @@ syntax = "proto3";
 package storage;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// All Identity information needed for Authentication and Authorization is contained in the message headers
 
 message PutRequest {
   bytes key = 1;
   bytes value = 2;
-  optional uint32 crc = 3;
+  string namespace = 3;
+  optional uint32 crc = 4;
 }
 
 message PutResponse {
@@ -17,7 +21,8 @@ message PutResponse {
 
 message GetRequest {
   bytes key = 1;
-  optional uint32 version = 2;
+  string namespace = 2;
+  optional uint32 version = 3;
 }
 
 message GetResponse {
@@ -28,8 +33,27 @@ message GetResponse {
   uint32 crc = 5;
 }
 
+message DeleteRequest {
+  bytes key = 1;
+}
+
+message CreateNamespaceRequest {
+  string name = 1;
+}
+
+message DeleteNamespaceRequest {
+  string name = 1;
+}
+
+message MigrateToNewNodeRequest {
+  uint32 storageNodeNumber = 1;
+}
 
 service Storage {
+  rpc CreateNamespace(CreateNamespaceRequest) returns (google.protobuf.Empty);
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (google.protobuf.Empty);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  rpc Delete(DeleteRequest) returns (google.protobuf.Empty);
+  rpc MigrateToNewNode(MigrateToNewNodeRequest) returns (google.protobuf.Empty);
 }
