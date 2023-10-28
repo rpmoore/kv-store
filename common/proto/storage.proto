@@ -33,8 +33,9 @@ message GetResponse {
   uint32 crc = 5;
 }
 
-message DeleteRequest {
-  bytes key = 1;
+message DeleteKeyRequest {
+  string namespace = 1;
+  bytes key = 2;
 }
 
 message CreateNamespaceRequest {
@@ -49,11 +50,20 @@ message MigrateToNewNodeRequest {
   uint32 storageNodeNumber = 1;
 }
 
+message ListKeysRequest {
+  string namespace = 1;
+}
+
+message ListKeysResponse {
+  repeated bytes key = 1; // might want to consider returning some metadata here
+}
+
 service Storage {
   rpc CreateNamespace(CreateNamespaceRequest) returns (google.protobuf.Empty);
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (google.protobuf.Empty);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Get(GetRequest) returns (GetResponse);
-  rpc Delete(DeleteRequest) returns (google.protobuf.Empty);
+  rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
+  rpc Delete(DeleteKeyRequest) returns (google.protobuf.Empty);
   rpc MigrateToNewNode(MigrateToNewNodeRequest) returns (google.protobuf.Empty);
 }

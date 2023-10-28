@@ -22,4 +22,5 @@ message AddStorageServerRequest {
 service Admin {
   rpc ListStorageServers(google.protobuf.Empty) returns (ListStorageServersResp);
   rpc AddStorageServer(AddStorageServerRequest) returns (google.protobuf.Empty);
+
 }

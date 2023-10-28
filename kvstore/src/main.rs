@@ -21,6 +21,8 @@ use futures::try_join;
 use tonic::Extensions;
 use common::auth::{JwtIssuer, RsaJwtIssuer};
 use uuid::Uuid;
+use sqlx::sqlite::{SqlitePoolOptions, Sqlite, SqliteQueryResult};
+use sqlx::{Pool, query, migrate::MigrateDatabase};
 
 mod connections;
 
@@ -40,6 +42,12 @@ async fn main() -> Result<(), Error> {
         ErrorKind::InvalidData
     })?;
 
+    let pool = create_db_pool("sqlite://data.db").await?;
+
+    info!("creating sqlite tables");
+    create_tables(&pool).await.unwrap();
+    info!("ran create tables");
+
     let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
 
     let client = StorageClient::new(channel);
@@ -47,7 +55,7 @@ async fn main() -> Result<(), Error> {
     let mut connection_manager = connections::ConnectionManager::default();
     connection_manager.new_conn(client);
 
-    let app_data = web::Data::new(AppData{connection_manager, jwt_issuer: issuer});
+    let app_data = web::Data::new(AppData{connection_manager, jwt_issuer: issuer, db_pool: pool});
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
 
@@ -61,10 +69,36 @@ async fn main() -> Result<(), Error> {
     try_join!(healthcheck, server).map(|(_,_)| ())
 }
 
+async fn create_db_pool(path: &str) -> Result<Pool<Sqlite>, ErrorKind> {
+    if !Sqlite::database_exists(path).await.unwrap_or(false) {
+        println!("Creating database {}", path);
+        match Sqlite::create_database(path).await {
+            Ok(_) => println!("Create db success"),
+            Err(err) => {
+                error!(err = err.to_string(), "failed to create db");
+                return Err(ErrorKind::NotFound);
+            }
+        }
+    }
+
+    let pool = SqlitePoolOptions::new().connect(path).await.map_err(|err| {
+        error!{err = err.to_string(), "failed to connect to db"};
+        ErrorKind::NotFound
+    })?;
+    Ok(pool)
+}
+
+async fn create_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    sqlx::query("create table if not exists namespaces (id integer primary key autoincrement, name varchar(255), tenant_id varchar(36), unique(tenant_id, name))").execute(pool).await?;
+    sqlx::query("create table if not exists storage_targets (id integer primary key autoincrement, namespace_id integer, endpoint varchar(255), foreign key(namespace_id) references namespaces(id))").execute(pool).await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct AppData {
     connection_manager: ConnectionManager,
     jwt_issuer: RsaJwtIssuer,
+    db_pool: Pool<Sqlite>
 }
 
 #[derive(Deserialize, Debug)]

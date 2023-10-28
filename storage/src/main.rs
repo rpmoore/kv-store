@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 use prost_types::Timestamp;
-use common::storage::{storage_server::Storage, storage_server::StorageServer, PutRequest, PutResponse, GetRequest, GetResponse, CreateNamespaceRequest, DeleteNamespaceRequest, DeleteRequest, MigrateToNewNodeRequest};
+use common::storage::{storage_server::Storage, storage_server::StorageServer, ListKeysResponse, ListKeysRequest, PutRequest, PutResponse, GetRequest, GetResponse, CreateNamespaceRequest, DeleteNamespaceRequest, DeleteKeyRequest, MigrateToNewNodeRequest};
 use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
 use tonic::{transport::Server, Request, Response, Status, Code};
@@ -89,11 +89,15 @@ impl Storage for NodeStorageServer {
         todo!()
     }
 
-    async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<()>, Status> {
+    async fn delete(&self, request: Request<DeleteKeyRequest>) -> Result<Response<()>, Status> {
         todo!()
     }
 
     async fn migrate_to_new_node(&self, request: Request<MigrateToNewNodeRequest>) -> Result<Response<()>, Status> {
+        todo!()
+    }
+
+    async fn list_keys(&self, request: Request<ListKeysRequest>) -> Result<Response<ListKeysResponse>, Status> {
         todo!()
     }
 }

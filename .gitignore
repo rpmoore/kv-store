@@ -23,3 +23,6 @@ Cargo.lock
 *.key
 *.pem
 *.swp
+*.db
+*.db-shm
+*.db-wal
