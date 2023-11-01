@@ -1,25 +1,18 @@
 use std::io::{Error, ErrorKind};
 use common::storage::{PutRequest, storage_client::StorageClient};
-use tonic;
-use std::fmt;
-use actix_web;
-use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, post, put, Responder, web};
+use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, post, put, Responder, web};
 use actix_web::http::StatusCode;
-use actix_web::http::header::TryIntoHeaderValue;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
 use crate::connections::ConnectionManager;
-use tracing_subscriber;
-use tracing_actix_web;
 use tracing_actix_web::TracingLogger;
-use tracing::{error, info, Level, Subscriber};
+use tracing::{error, info, Level};
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
-use tracing_subscriber::Layer;
 use futures::{try_join, TryStreamExt};
 use tonic::Extensions;
-use common::auth::{JwtIssuer, JwtValidator, RsaJwtIssuer};
+use common::auth::{JwtIssuer, JwtValidator};
 use uuid::Uuid;
 use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
 use sqlx::{migrate::MigrateDatabase, Pool, query, Row};
@@ -182,7 +175,7 @@ async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest
     let issuer = app_data.jwts.clone();
 
     let tenant = match query("select name, uuid from tenants where name = ?")
-        .bind(data.into_inner().name)
+        .bind(&data.name)
         .map(|row: SqliteRow| Tenant{ name: row.get(0), uuid: Uuid::parse_str(row.get(1)).unwrap()} )
         .fetch_one(&app_data.db_pool).await {
         Ok(tenant) => tenant,
@@ -265,7 +258,7 @@ async fn list_namespaces(app_data : web::Data<AppData>, auth_data: web::Header<c
         }
     };
 
-    let tenant_id = identity.tenant_id().unwrap();
+    let tenant_id = identity.tenant_id();
 
     info!(tenant_id = tenant_id.to_string(), "fetching namespaces");
 

@@ -12,12 +12,12 @@ impl JwtIssuerVerifier {
     pub fn new(private_key: &[u8], public_key_path: &[u8]) -> Result<JwtIssuerVerifier> {
         let issuer = RsaJwtIssuer::new(private_key)?;
         let verifier = RsaJwtValidator::new(public_key_path)?;
-        return Ok(JwtIssuerVerifier{verifier, issuer })
+        Ok(JwtIssuerVerifier{verifier, issuer })
     }
 }
 
 impl JwtValidator for JwtIssuerVerifier {
-    fn parse(self, token_str: &str) -> Result<Identity> {
+    fn parse(self, token_str: impl Into<String>) -> Result<Identity> {
         self.verifier.parse(token_str)
     }
 }

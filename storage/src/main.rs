@@ -4,7 +4,6 @@ use common::storage::{CreateNamespaceRequest, DeleteKeyRequest, DeleteNamespaceR
 use common::auth::{JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
 use tonic::{Code, Request, Response, Status, transport::Server};
-use tokio;
 use tracing::{error, info, Level};
 use tracing_attributes::instrument;
 
@@ -66,7 +65,7 @@ impl Storage for NodeStorageServer {
             }
         };
 
-        let identity = match self.jwt_validator.clone().parse(auth_header.as_ref()) {
+        let identity = match self.jwt_validator.clone().parse(auth_header) {
             Ok(id) => id,
             Err(err) => {
                 error!(err = err.to_string(), "invalid auth header");
@@ -74,7 +73,7 @@ impl Storage for NodeStorageServer {
             }
         };
 
-        info!(tenant_id = identity.tenant_id().unwrap().to_string(), "authenticated as tenant");
+        info!(tenant_id = identity.tenant_id().to_string(), "authenticated as tenant");
 
         println!("got request to put data");
         let response = PutResponse {

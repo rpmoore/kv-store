@@ -14,7 +14,7 @@ use tonic::metadata::{MetadataMap, MetadataValue};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String,
+    sub: Uuid,
     company: String,
     iss: String,
 }
@@ -25,15 +25,8 @@ pub struct Identity {
 }
 
 impl Identity {
-    pub fn tenant_id(self) -> Option<Uuid> {
-        let subject = self.claims.sub;
-        match Uuid::parse_str(subject.as_str()) {
-            Ok(uuid) => Some(uuid),
-            Err(err) => {
-                error!(err = err.to_string(), "invalid uuid type - should not happen if constructed correctly");
-                None
-            }
-        }
+    pub fn tenant_id(self) -> Uuid {
+        self.claims.sub
     }
 
     pub fn token(self) -> String {
@@ -64,7 +57,7 @@ impl JwtIssuer for RsaJwtIssuer {
     #[instrument]
     fn new_identity(self, tenant_id: Uuid) -> errors::Result<Identity> {
         let claims = Claims {
-            sub: tenant_id.to_string(),
+            sub: tenant_id,
             company: "my own".to_owned(),
             iss: "kvstore".to_owned(),
 
@@ -73,7 +66,7 @@ impl JwtIssuer for RsaJwtIssuer {
 
         return Ok(Identity{
             token,
-            claims
+            claims,
         })
     }
 }
@@ -85,7 +78,7 @@ impl fmt::Debug for RsaJwtIssuer {
 }
 
 pub trait JwtValidator {
-    fn parse(self, token_str: &str) -> errors::Result<Identity>;
+    fn parse(self, token_str: impl Into<String>) -> errors::Result<Identity>;
 }
 
 #[derive(Clone)]
@@ -111,19 +104,26 @@ impl RsaJwtValidator {
 
 impl JwtValidator for RsaJwtValidator {
     #[instrument(skip(token_str))]
-    fn parse(self, token_str: &str) -> errors::Result<Identity> {
+    fn parse(self, token_str: impl Into<String>) -> errors::Result<Identity> {
+        let token_str = token_str.into();
         let mut validation = Validation::new(Algorithm::RS256);
         validation.validate_exp = false; // TODO for production remove this
         validation.required_spec_claims = HashSet::new();
 
-        let token = decode::<Claims>(token_str, &self.public_key, &validation)?;
+        let token = decode::<Claims>(&token_str, &self.public_key, &validation)?;
 
-        Ok(Identity { token: token_str.to_owned(), claims: token.claims })
+        Ok(Identity { token: token_str, claims: token.claims})
     }
 }
 
 pub struct AuthHeader {
     bearer: String
+}
+
+impl From<AuthHeader> for String {
+    fn from(value: AuthHeader) -> Self {
+        value.bearer
+    }
 }
 
 impl AsRef<str> for AuthHeader {
@@ -138,26 +138,28 @@ impl TryFrom<&MetadataMap> for AuthHeader {
     fn try_from(value: &MetadataMap) -> Result<Self, Self::Error> {
         value.get("Authorization")
             .ok_or(ErrorKind::NotFound)
-            .and_then(|header| header.to_str().map_err(|err| ErrorKind::NotFound))
+            .and_then(|header| header.to_str().map_err(|err|{
+                error!(err = err.to_string(), "failed to get auth header");
+                ErrorKind::NotFound
+            } ))
             .and_then(|auth|auth.split_ascii_whitespace()
-                .skip(1)
-                .next()
+                .nth(1)
                 .ok_or(ErrorKind::NotFound)
             ).map(|token| AuthHeader{bearer:token.to_string()})
     }
 }
 
-impl Into<MetadataMap> for AuthHeader{
-    fn into(self) -> MetadataMap {
+impl From<AuthHeader> for MetadataMap {
+    fn from(header: AuthHeader) -> Self {
         let mut map = MetadataMap::new();
 
-        match MetadataValue::try_from(format!("Bearer {}", self.bearer)) {
+        match MetadataValue::try_from(format!("Bearer {}", header.bearer)) {
             Ok(value) => {
                 map.append(header::AUTHORIZATION.as_str(), value);
                 map
             },
             Err(err) => {
-                error!("failed to append authorization header");
+                error!(err = err.to_string(), "failed to append authorization header");
                 map
             }
         }
@@ -189,7 +191,7 @@ impl header::Header for AuthHeader {
                 error!(err = err.to_string(), "failed to get auth header");
                 ParseError::Header
             }
-            ).and_then(|value| value.split_ascii_whitespace().skip(1).next().ok_or(ParseError::Header)) {
+            ).and_then(|value| value.split_ascii_whitespace().nth(1).ok_or(ParseError::Header)) {
                 Ok(auth) => Ok(AuthHeader{bearer: String::from(auth)}),
                 Err(err)=> {
                     error!{err = err.to_string(), "failed to get auth header"}
