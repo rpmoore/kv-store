@@ -67,9 +67,9 @@ async fn main() -> Result<(), Error> {
 
 async fn create_db_pool(path: &str) -> Result<Pool<Sqlite>, ErrorKind> {
     if !Sqlite::database_exists(path).await.unwrap_or(false) {
-        println!("Creating database {}", path);
+        info!(path = path, "creating database");
         match Sqlite::create_database(path).await {
-            Ok(_) => println!("Create db success"),
+            Ok(_) => info!("created db successfully"),
             Err(err) => {
                 error!(err = err.to_string(), "failed to create db");
                 return Err(ErrorKind::NotFound);
@@ -88,9 +88,8 @@ async fn create_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     query("create table if not exists namespaces (id integer primary key autoincrement, uuid varchar(36), name varchar(255), tenant_id integer, unique(tenant_id, name), foreign key(tenant_id) references tenants(id))").execute(pool).await?;
     query("create table if not exists storage_targets (id integer primary key autoincrement, namespace_id integer, endpoint varchar(255))").execute(pool).await?;
     query("create table if not exists tenants(id integer primary key autoincrement, uuid varchar(36), name varchar(255), password_hash varchar(255), unique(name), unique(uuid))").execute(pool).await?;
-    let user_id: u32 = match query("insert or ignore into tenants (name, uuid) values ('dev', ?) returning id").bind(Uuid::new_v4().to_string()).map(|row :SqliteRow| row.get(0)).fetch(pool).try_next().await? {
-        Some(id) => id,
-        None => return Ok(())
+    let Some::<u32>(user_id) = query("insert or ignore into tenants (name, uuid) values ('dev', ?) returning id").bind(Uuid::new_v4().to_string()).map(|row :SqliteRow| row.get(0)).fetch(pool).try_next().await? else {
+        return Ok(())
     };
     query("insert or ignore into namespaces (name, uuid, tenant_id) values('dev', ?, ?)").bind(Uuid::new_v4().to_string()).bind(user_id).execute(pool).await?;
     Ok(())
@@ -155,7 +154,7 @@ impl error::ResponseError for KVErrors {
 
 #[derive(Serialize, Debug)]
 struct GenTokenResponse {
-    token: String
+    token: common::auth::Token
 }
 
 #[derive(Deserialize, Debug)]
@@ -172,8 +171,6 @@ struct Tenant {
 #[instrument]
 #[post("/tokens")]
 async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest>) -> Result<impl Responder, Box<dyn std::error::Error>> {
-    let issuer = app_data.jwts.clone();
-
     let tenant = match query("select name, uuid from tenants where name = ?")
         .bind(&data.name)
         .map(|row: SqliteRow| Tenant{ name: row.get(0), uuid: Uuid::parse_str(row.get(1)).unwrap()} )
@@ -184,7 +181,7 @@ async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest
             return Ok(HttpResponseBuilder::new(StatusCode::BAD_REQUEST).finish())
         }
     };
-    let token = issuer.new_identity(tenant.uuid)?;
+    let token = app_data.jwts.new_identity(tenant.uuid)?;
     Ok(HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse{token:token.token()}))
 }
 
@@ -192,7 +189,6 @@ async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest
 #[put("/namespaces/{namespace}/keys/{id}")]
 async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
     let (namespace, id) = path.into_inner();
-
     // grab identity from headers
     let metadata = auth_data.into_inner().into();
 
@@ -247,15 +243,12 @@ struct NamespacesResponse {
     namespaces: Vec<NamespaceResponse>
 }
 
-#[instrument(skip(app_data))]
+#[instrument(skip(app_data, auth_data))]
 #[get("/namespaces")]
 async fn list_namespaces(app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
-    let identity = match app_data.jwts.clone().parse(auth_data.as_ref()) {
-        Ok(id) => id,
-        Err(err) => {
-            error!(err = err.to_string(), "failed to verify auth data");
-            return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
-        }
+    let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
+        error!("failed to verify auth data");
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
     };
 
     let tenant_id = identity.tenant_id();

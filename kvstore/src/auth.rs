@@ -17,13 +17,13 @@ impl JwtIssuerVerifier {
 }
 
 impl JwtValidator for JwtIssuerVerifier {
-    fn parse(self, token_str: impl Into<String>) -> Result<Identity> {
+    fn parse(&self, token_str: impl Into<String>) -> Result<Identity> {
         self.verifier.parse(token_str)
     }
 }
 
 impl JwtIssuer for JwtIssuerVerifier {
-    fn new_identity(self, tenant_id: Uuid) -> Result<Identity> {
+    fn new_identity(&self, tenant_id: Uuid) -> Result<Identity> {
         self.issuer.new_identity(tenant_id)
     }
 }

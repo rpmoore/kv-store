@@ -1,15 +1,18 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::fmt::Formatter;
+use std::fmt::{Display, Formatter, Write};
 use std::io::ErrorKind;
 use actix_web::error::ParseError;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderName, HeaderValue, InvalidHeaderValue, TryIntoHeaderValue};
 use actix_web::HttpMessage;
 use uuid::Uuid;
+use std::sync::Arc;
+use sha2::{Sha384, Digest};
+use base64::{Engine as _, engine::general_purpose};
 use tracing::{error, instrument};
 use jsonwebtoken::{encode, Header, Algorithm, EncodingKey, decode, DecodingKey, errors, Validation};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use tonic::metadata::{MetadataMap, MetadataValue};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,23 +22,50 @@ struct Claims {
     iss: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct Token(Arc<str>);
+
+impl Serialize for Token {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+        serializer.serialize_str(self.as_ref())
+    }
+}
+
+impl AsRef<str> for Token {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+// Implement Display so that we can hash the token and we don't accidentally store it in logs
+impl Display for Token {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut hasher = Sha384::new();
+        f.write_str("sha256")?;
+        hasher.update(self.0.as_bytes());
+        let result = hasher.finalize();
+        f.write_str(general_purpose::STANDARD_NO_PAD.encode(result).as_str())?;
+        Ok(())
+    }
+}
+
 pub struct Identity {
-    token: String,
+    token: Token,
     claims: Claims,
 }
 
 impl Identity {
-    pub fn tenant_id(self) -> Uuid {
+    pub fn tenant_id(&self) -> Uuid {
         self.claims.sub
     }
 
-    pub fn token(self) -> String {
-        self.token
+    pub fn token(&self) -> Token {
+        self.token.clone()
     }
 }
 
 pub trait JwtIssuer {
-    fn new_identity(self, tenant_id: Uuid) -> errors::Result<Identity>;
+    fn new_identity(&self, tenant_id: Uuid) -> errors::Result<Identity>;
 }
 
 #[derive(Clone)]
@@ -55,7 +85,7 @@ impl RsaJwtIssuer {
 
 impl JwtIssuer for RsaJwtIssuer {
     #[instrument]
-    fn new_identity(self, tenant_id: Uuid) -> errors::Result<Identity> {
+    fn new_identity(&self, tenant_id: Uuid) -> errors::Result<Identity> {
         let claims = Claims {
             sub: tenant_id,
             company: "my own".to_owned(),
@@ -65,7 +95,7 @@ impl JwtIssuer for RsaJwtIssuer {
         let token = encode(&Header::new(Algorithm::RS256), &claims, &self.private_key)?;
 
         return Ok(Identity{
-            token,
+            token: Token(token.into()),
             claims,
         })
     }
@@ -78,7 +108,7 @@ impl fmt::Debug for RsaJwtIssuer {
 }
 
 pub trait JwtValidator {
-    fn parse(self, token_str: impl Into<String>) -> errors::Result<Identity>;
+    fn parse(&self, token_str: impl Into<String>) -> errors::Result<Identity>;
 }
 
 #[derive(Clone)]
@@ -104,7 +134,7 @@ impl RsaJwtValidator {
 
 impl JwtValidator for RsaJwtValidator {
     #[instrument(skip(token_str))]
-    fn parse(self, token_str: impl Into<String>) -> errors::Result<Identity> {
+    fn parse(&self, token_str: impl Into<String>) -> errors::Result<Identity> {
         let token_str = token_str.into();
         let mut validation = Validation::new(Algorithm::RS256);
         validation.validate_exp = false; // TODO for production remove this
@@ -112,7 +142,7 @@ impl JwtValidator for RsaJwtValidator {
 
         let token = decode::<Claims>(&token_str, &self.public_key, &validation)?;
 
-        Ok(Identity { token: token_str, claims: token.claims})
+        Ok(Identity { token: Token(token_str.into()), claims: token.claims})
     }
 }
 

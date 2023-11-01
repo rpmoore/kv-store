@@ -56,21 +56,16 @@ impl Storage for NodeStorageServer {
         todo!()
     }
 
+    #[instrument(skip(request))]
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
-        let auth_header = match common::auth::AuthHeader::try_from(request.metadata()) {
-            Ok(header) => header,
-            Err(err) => {
-                error!(err = err.to_string(), "invalid auth header");
-                return Err(Status::new(Code::Unauthenticated, "auth header missing"))
-            }
+        let Ok(auth_header) = common::auth::AuthHeader::try_from(request.metadata()) else {
+            error!("invalid auth header");
+            return Err(Status::new(Code::Unauthenticated, "auth header missing"))
         };
 
-        let identity = match self.jwt_validator.clone().parse(auth_header) {
-            Ok(id) => id,
-            Err(err) => {
-                error!(err = err.to_string(), "invalid auth header");
-                return Err(Status::new(Code::NotFound, "not found"))
-            }
+        let Ok(identity) = self.jwt_validator.parse(auth_header) else {
+            error!("invalid auth header");
+            return Err(Status::new(Code::NotFound, "not found"))
         };
 
         info!(tenant_id = identity.tenant_id().to_string(), "authenticated as tenant");
@@ -88,15 +83,15 @@ impl Storage for NodeStorageServer {
         todo!()
     }
 
+    async fn list_keys(&self, request: Request<ListKeysRequest>) -> Result<Response<ListKeysResponse>, Status> {
+        todo!()
+    }
+
     async fn delete(&self, request: Request<DeleteKeyRequest>) -> Result<Response<()>, Status> {
         todo!()
     }
 
     async fn migrate_to_new_node(&self, request: Request<MigrateToNewNodeRequest>) -> Result<Response<()>, Status> {
-        todo!()
-    }
-
-    async fn list_keys(&self, request: Request<ListKeysRequest>) -> Result<Response<ListKeysResponse>, Status> {
         todo!()
     }
 }
