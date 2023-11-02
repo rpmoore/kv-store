@@ -201,7 +201,7 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
 
     let request = tonic::Request::from_parts(metadata, Extensions::default(),PutRequest {
         namespace: namespace.to_owned(),
-        key: id.clone().into_bytes(),
+        key: id.into_bytes(),
         value: value.value.into_bytes(),
         crc: value.crc,
     });
@@ -209,7 +209,7 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
     let put_response = match client.put(request).await {
         Ok(response) => response.into_inner(),
         Err(err) => {
-            error!(key = id, err = err.to_string(), "failed to put value");
+            error!(err = err.to_string(), "failed to put value");
             return Err(KVErrors::InternalServerError)
         }
     };

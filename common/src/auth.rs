@@ -41,7 +41,7 @@ impl AsRef<str> for Token {
 impl Display for Token {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut hasher = Sha384::new();
-        f.write_str("sha256")?;
+        f.write_str("sha384::")?;
         hasher.update(self.0.as_bytes());
         let result = hasher.finalize();
         f.write_str(general_purpose::STANDARD_NO_PAD.encode(result).as_str())?;
