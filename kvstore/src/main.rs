@@ -32,7 +32,7 @@ async fn main() -> Result<(), Error> {
         .init();
 
     let private_key = common::read_file_bytes("key.pem")?;
-    let public_key = common::read_file_bytes("key.pub.pem")?;
+    let public_key = common::read_file_bytes("key.pub")?;
     let jwts = auth::JwtIssuerVerifier::new(private_key.as_slice(), public_key.as_slice()).map_err(|err| {
         error!{err = err.to_string(), "failed to parse key"};
         ErrorKind::InvalidData

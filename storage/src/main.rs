@@ -1,3 +1,5 @@
+mod namespace;
+
 use std::time::SystemTime;
 use prost_types::Timestamp;
 use common::storage::{CreateNamespaceRequest, DeleteKeyRequest, DeleteNamespaceRequest, GetRequest, GetResponse, ListKeysRequest, ListKeysResponse, MigrateToNewNodeRequest, PutRequest, PutResponse, storage_server::Storage, storage_server::StorageServer};
@@ -19,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = "[::1]:50051".parse()?;
 
-    let private_key = read_file_bytes("key.pub.pem")?;
+    let private_key = read_file_bytes("key.pub")?;
 
     let validator = RsaJwtValidator::new(private_key.as_slice())?;
 
@@ -49,6 +51,7 @@ impl Storage for NodeStorageServer {
 
     #[instrument]
     async fn create_namespace(&self, request: Request<CreateNamespaceRequest>) -> Result<Response<()>, Status> {
+
         todo!()
     }
 
