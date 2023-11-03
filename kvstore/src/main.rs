@@ -1,7 +1,8 @@
 use std::io::{Error, ErrorKind};
-use common::storage::{PutRequest, storage_client::StorageClient};
+use common::storage::{GetRequest, PutRequest, storage_client::StorageClient};
 use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, post, put, Responder, web};
 use actix_web::http::StatusCode;
+use actix_web::web::Data;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
@@ -170,7 +171,7 @@ struct Tenant {
 
 #[instrument]
 #[post("/tokens")]
-async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest>) -> Result<impl Responder, Box<dyn std::error::Error>> {
+async fn gen_token(app_data: Data<AppData>, data: web::Json<GenTokenRequest>) -> Result<impl Responder, Box<dyn std::error::Error>> {
     let tenant = match query("select name, uuid from tenants where name = ?")
         .bind(&data.name)
         .map(|row: SqliteRow| Tenant{ name: row.get(0), uuid: Uuid::parse_str(row.get(1)).unwrap()} )
@@ -185,25 +186,100 @@ async fn gen_token(app_data: web::Data<AppData>, data: web::Json<GenTokenRequest
     Ok(HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse{token:token.token()}))
 }
 
+#[derive(Serialize)]
+struct GetRestResponse {
+    value: Vec<u8>,
+    version: u32,
+    crc: u32
+}
+
+#[instrument(skip(auth_data, app_data))]
+#[get("/namespaces/{namespace}/keys/{id}")]
+async fn get(path: web::Path<(String, String)>, app_data : Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+    let (namespace, id) = path.into_inner();
+    let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
+        error!("failed to verify auth data");
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+    };
+    let metadata = auth_data.into_inner().into();
+
+    let tenant_id = identity.tenant_id();
+
+    info!(tenant_id = tenant_id.to_string(), "putting key");
+
+    // determine if namespace exists from the database
+    if !namespace_exists(&app_data.db_pool, tenant_id,  &namespace).await {
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
+    }
+
+    let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
+
+    let request = tonic::Request::from_parts(metadata, Extensions::default(), GetRequest{
+        key: id.into_bytes(),
+        namespace,
+        version: None,
+    });
+
+    let response :GetRestResponse = match client.get(request).await {
+        Ok(response) => {
+            let response = response.get_ref();
+            GetRestResponse {
+                value: response.value.clone(),
+                version: response.version,
+                crc: response.crc,
+            }
+        }
+        Err(err) => {
+            error!(err = err.to_string(), "failed to get key");
+            return Err(KVErrors::InternalServerError)
+        }
+    };
+
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(response))
+}
+
+async fn namespace_exists(db_pool: &Pool<Sqlite>, tenant: Uuid, namespace: &str) -> bool {
+    match query("exists(select * from namespaces left join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ? and namespaces.name = ?)")
+        .bind(tenant.to_string())
+        .bind(&namespace)
+        .map(|sqlite_row: SqliteRow| sqlite_row.get(0))
+        .fetch_one(db_pool)
+        .await {
+        Ok(exists) => exists,
+        Err(err) => {
+            error!(err = err.to_string(), "failed to determine if namespace exists");
+            false
+        }
+    }
+}
+
 #[instrument]
 #[put("/namespaces/{namespace}/keys/{id}")]
 async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
     let (namespace, id) = path.into_inner();
-    // grab identity from headers
+     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
+        error!("failed to verify auth data");
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+    };
     let metadata = auth_data.into_inner().into();
 
-    let mut client = {
-        app_data.connection_manager.get_conn(0).unwrap().clone() // clone to avoid race conditions
-    };
+    let tenant_id = identity.tenant_id();
 
-    let value = data.into_inner();
+    // determine if namespace exists from the database
+    if !namespace_exists(&app_data.db_pool, tenant_id,  &namespace).await {
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
+    }
+
+    let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
+
+
     info!(key = id, "putting new key");
 
     let request = tonic::Request::from_parts(metadata, Extensions::default(),PutRequest {
         namespace: namespace.to_owned(),
         key: id.into_bytes(),
-        value: value.value.into_bytes(),
-        crc: value.crc,
+        crc: data.crc,
+        value: data.value.clone().into_bytes(),
     });
 
     let put_response = match client.put(request).await {
@@ -214,11 +290,11 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
         }
     };
 
-    Ok(PutResp{
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(PutResp{
         version: put_response.version,
         crc: put_response.crc,
         creation_time: put_response.creation_time.map_or(String::from(""), |timestamp| timestamp.to_string())
-    })
+    }))
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -245,7 +321,7 @@ struct NamespacesResponse {
 
 #[instrument(skip(app_data, auth_data))]
 #[get("/namespaces")]
-async fn list_namespaces(app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn list_namespaces(app_data : Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
         error!("failed to verify auth data");
         return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
