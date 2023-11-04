@@ -16,3 +16,4 @@ tracing = {workspace = true}
 tracing-attributes = { workspace = true }
 tracing-subscriber = {workspace = true}
 uuid = {workspace = true}
+serde = {workspace = true}
