@@ -1,30 +1,54 @@
-use rocksdb::{BoundColumnFamily, DB, DEFAULT_COLUMN_FAMILY_NAME, Error, ErrorKind, Options, WriteBatch};
+use std::fmt::{Debug, Formatter};
+use rocksdb::{DB, DEFAULT_COLUMN_FAMILY_NAME, Error, ErrorKind, Options, WriteBatch};
 use std::sync::Arc;
 use std::path::Path;
 use serde::{Serialize, Deserialize};
 use tracing::error;
+use uuid::Uuid;
 
 pub struct Namespace {
     name: String,
+    partition_id: u32,
+    tenant_id: Uuid,
     db: Arc<DB>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Value {
-    crc: u32,
-    version: u32, // need to check to make sure the current version at least one above the current version, and if it is not, return a cas error
-    value: Box<[u8]>,
+impl Debug for Namespace {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Namespace")
+            .field("name", &self.name)
+            .field("tenant_id", &self.tenant_id)
+            .field("partition_id", &self.partition_id)
+            .finish()
+    }
 }
 
-impl Value {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PutValue<'a> {
+    pub crc: u32,
+    pub version: u32, // need to check to make sure the current version at least one above the current version, and if it is not, return a cas error
+    pub value: &'a[u8],
+}
+
+impl PutValue<'_> {
     // Might want to consider passing in the buffer that is stack allocated to fill instead of allocating a vec on the heap for this
     fn metadata_as_bytes(&self) -> Vec<u8> {
         return vec!(self.crc.to_be_bytes().as_slice(), self.version.to_be_bytes().as_slice()).concat().to_vec()
     }
 }
 
+pub struct ValueMetadata {
+    pub crc: u32,
+    pub version: u32,
+}
+
+pub struct GetValue {
+    pub crc: u32,
+    pub version: u32, // need to check to make sure the current version at least one above the current version, and if it is not, return a cas error
+    pub value: Box<[u8]>,
+}
 impl Namespace {
-    fn new<I>(name: impl Into<String>, path: I) -> Result<Namespace, Error> where I: AsRef<Path>{
+    pub fn new<I>(name: impl Into<String>, partition_id: u32, tenant_id: Uuid, path: I) -> Result<Namespace, Error> where I: AsRef<Path>{
         let name =  name.into();
         let mut options = Options::default();
         options.create_if_missing(true);
@@ -33,10 +57,11 @@ impl Namespace {
         let db = DB::open_cf(&options, &path, vec!(DEFAULT_COLUMN_FAMILY_NAME, "metadata"))?;
 
         let db= Arc::new(db);
-        Ok(Namespace{name, db})
+        Ok(Namespace{name, partition_id, tenant_id, db})
     }
 
-    fn get(&self, key: &[u8]) -> Result<Value, ErrorKind> {
+    //todo need to return a different error type here
+    pub fn get(&self, key: &[u8]) -> Result<GetValue, ErrorKind> {
         let metadata_handle = self.db.cf_handle("metadata").unwrap();
         let default_handle = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
 
@@ -65,30 +90,35 @@ impl Namespace {
             _ => return Err(ErrorKind::Incomplete)
         };
 
-        Ok(Value{
+        Ok(GetValue {
             crc,
             version,
             value
         })
     }
 
-    fn put(&self, key: &[u8], value: &Value) -> Result<(), rocksdb::ErrorKind> {
+    pub fn put(&self, key: &[u8], value: &PutValue) -> Result<ValueMetadata, rocksdb::ErrorKind> {
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
         batch.put_cf(&cf_handle, key, value.metadata_as_bytes());
-        batch.put(key, &value.value);
+        batch.put(key, value.value);
 
         self.db.write(batch).map_err(|err| {
             error!{err = err.to_string(), "failed to write value"};
             err.kind()
+        })?;
+
+        Ok(ValueMetadata {
+            crc: value.crc,
+            version: value.version,
         })
     }
 
-    fn exists(&self, key: &[u8]) -> Result<bool, Error> {
+    pub fn exists(&self, key: &[u8]) -> Result<bool, Error> {
         self.db.get(key).map(|v| v.is_some())
     }
 
-    fn delete(&self, key: &[u8]) -> Result<(), Error> {
+    pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
         self.db.delete(key)
     }
 }

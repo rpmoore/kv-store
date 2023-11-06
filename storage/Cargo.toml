@@ -17,3 +17,4 @@ tracing-attributes = { workspace = true }
 tracing-subscriber = {workspace = true}
 uuid = {workspace = true}
 serde = {workspace = true}
+crc32fast = {workspace = true}

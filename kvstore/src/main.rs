@@ -13,10 +13,12 @@ use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use futures::{try_join, TryStreamExt};
 use tonic::Extensions;
+use std::sync::Arc;
 use common::auth::{JwtIssuer, JwtValidator};
 use uuid::Uuid;
 use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
 use sqlx::{migrate::MigrateDatabase, Pool, query, Row};
+use crc32fast::Hasher;
 
 mod connections;
 mod auth;
@@ -59,6 +61,7 @@ async fn main() -> Result<(), Error> {
         .service(put)
         .service(gen_token)
         .service(list_namespaces)
+        .service(get)
     )
         .bind(("0.0.0.0", 8080)).unwrap()
         .run();
@@ -186,12 +189,6 @@ async fn gen_token(app_data: Data<AppData>, data: web::Json<GenTokenRequest>) ->
     Ok(HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse{token:token.token()}))
 }
 
-#[derive(Serialize)]
-struct GetRestResponse {
-    value: Vec<u8>,
-    version: u32,
-    crc: u32
-}
 
 #[instrument(skip(auth_data, app_data))]
 #[get("/namespaces/{namespace}/keys/{id}")]
@@ -220,26 +217,21 @@ async fn get(path: web::Path<(String, String)>, app_data : Data<AppData>, auth_d
         version: None,
     });
 
-    let response :GetRestResponse = match client.get(request).await {
+    match client.get(request).await {
         Ok(response) => {
             let response = response.get_ref();
-            GetRestResponse {
-                value: response.value.clone(),
-                version: response.version,
-                crc: response.crc,
-            }
+
+            Ok(HttpResponseBuilder::new(StatusCode::OK).append_header(("version", response.version.to_string())).append_header(("crc",response.crc.to_string())).content_type("plain/text").body(response.value.clone()))
         }
         Err(err) => {
             error!(err = err.to_string(), "failed to get key");
-            return Err(KVErrors::InternalServerError)
+            Err(KVErrors::InternalServerError)
         }
-    };
-
-    Ok(HttpResponseBuilder::new(StatusCode::OK).json(response))
+    }
 }
 
 async fn namespace_exists(db_pool: &Pool<Sqlite>, tenant: Uuid, namespace: &str) -> bool {
-    match query("exists(select * from namespaces left join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ? and namespaces.name = ?)")
+    match query("select exists(select * from namespaces left join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ? and namespaces.name = ?)")
         .bind(tenant.to_string())
         .bind(&namespace)
         .map(|sqlite_row: SqliteRow| sqlite_row.get(0))
@@ -272,13 +264,26 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
 
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
+    let mut hasher = Hasher::new();
+    hasher.update(id.as_bytes());
+    hasher.update(data.value.as_bytes());
+    let crc = hasher.finalize();
 
     info!(key = id, "putting new key");
+
+    match data.crc {
+        Some(crc) => {
+            if crc != crc {
+                return Ok(HttpResponseBuilder::new(StatusCode::BAD_REQUEST).finish());
+            }
+        },
+        None => {}
+    }
 
     let request = tonic::Request::from_parts(metadata, Extensions::default(),PutRequest {
         namespace: namespace.to_owned(),
         key: id.into_bytes(),
-        crc: data.crc,
+        crc: Some(crc),
         value: data.value.clone().into_bytes(),
     });
 
