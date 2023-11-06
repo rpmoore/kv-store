@@ -13,7 +13,6 @@ use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use futures::{try_join, TryStreamExt};
 use tonic::Extensions;
-use std::sync::Arc;
 use common::auth::{JwtIssuer, JwtValidator};
 use uuid::Uuid;
 use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
