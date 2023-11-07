@@ -98,6 +98,7 @@ impl Namespace {
     }
 
     pub fn put(&self, key: &[u8], value: &PutValue) -> Result<ValueMetadata, rocksdb::ErrorKind> {
+        // todo get the metadata first to get the latest version and crc information, then update if no invariants are violated, like making sure the version we're going to put is larger than the current version
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
         batch.put_cf(&cf_handle, key, value.metadata_as_bytes());
