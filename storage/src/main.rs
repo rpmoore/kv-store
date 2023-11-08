@@ -1,7 +1,10 @@
 mod lookup;
-mod namespace;
+mod partition;
+mod auth;
 
-use crate::namespace::ListOptions;
+use auth::AuthInterceptor;
+use partition::ListOptions;
+use lookup::PartitionLookup;
 use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
 use common::storage::{
@@ -10,7 +13,7 @@ use common::storage::{
     ListKeysRequest, ListKeysResponse, MigrateToNewNodeRequest, PutRequest, PutResponse,
 };
 use crc32fast::Hasher;
-use namespace::{Namespace, PutValue};
+use partition::{Partition, PutValue};
 use prost_types::Timestamp;
 use std::time::SystemTime;
 use tonic::service::Interceptor;
@@ -38,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let interceptor = AuthInterceptor::new(validator);
 
     // replace with a real namespace in the future that belongs to a specific tenant
-    let namespace = Namespace::new("test", 0, Uuid::new_v4(), "namespaces")?;
+    let namespace = Partition::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "namespaces")?;
 
     let server = NodeStorageServer::new(namespace);
 
@@ -49,46 +52,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct AuthInterceptor {
-    jwt_validator: RsaJwtValidator,
-}
-
-impl AuthInterceptor {
-    fn new(jwt_validator: RsaJwtValidator) -> AuthInterceptor {
-        AuthInterceptor { jwt_validator }
-    }
-}
-
-impl Interceptor for AuthInterceptor {
-    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        let Ok(auth_header) = common::auth::AuthHeader::try_from(request.metadata()) else {
-            error!("invalid auth header");
-            return Err(Status::new(Code::Unauthenticated, "auth header missing"));
-        };
-
-        let Ok(identity) = self.jwt_validator.parse(auth_header) else {
-            error!("invalid auth header");
-            return Err(Status::new(Code::NotFound, "not found"));
-        };
-
-        info!(
-            tenant_id = identity.tenant_id().to_string(),
-            "authenticated as tenant"
-        );
-        request.extensions_mut().insert(identity);
-        Ok(request)
-    }
-}
-
 #[derive(Debug)]
 struct NodeStorageServer {
-    namespace: Namespace,
+    partition_lookup: PartitionLookup,
+    namespace: Partition,
 }
 
 impl NodeStorageServer {
-    fn new(namespace: Namespace) -> NodeStorageServer {
-        NodeStorageServer { namespace }
+    fn new(namespace: Partition) -> NodeStorageServer {
+        NodeStorageServer { namespace, partition_lookup: PartitionLookup::default()}
+
     }
 }
 
@@ -109,7 +82,7 @@ impl Storage for NodeStorageServer {
         todo!()
     }
 
-    #[instrument(skip(request))]
+    #[instrument(skip(request) fields(namespace_id = %request.get_ref().namespace_id))]
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         let identity = request.extensions().get::<Identity>().unwrap();
 
@@ -119,6 +92,14 @@ impl Storage for NodeStorageServer {
             uuid = identity.tenant_id().to_string(),
             "got request to put data"
         );
+
+        let namespace_id = match Uuid::parse_str(&request.namespace_id) {
+            Ok(id) => id,
+            Err(err) => {
+                error!(err = err.to_string(), "failed to parse uuid");
+                return Err(Status::new(Code::InvalidArgument, "invalid uuid"));
+            }
+        };
 
         let mut crc_hasher = Hasher::new();
         crc_hasher.update(request.key.as_slice());
@@ -137,7 +118,10 @@ impl Storage for NodeStorageServer {
             }
         };
 
-        match self.namespace.put(
+        let partition = self.partition_lookup.get_partition_for_key(identity.tenant_id(), namespace_id, request.key.as_slice())
+            .ok_or(Status::new(Code::NotFound, "partition not found"))?;
+
+        match partition.put(
             request.key.as_slice(),
             &PutValue {
                 crc: calculated_crc,
@@ -165,6 +149,8 @@ impl Storage for NodeStorageServer {
             "got request to get data"
         );
 
+
+
         match self.namespace.get(request.get_ref().key.as_slice()) {
             Ok(value) => Ok(Response::new(GetResponse {
                 key: request.get_ref().key.clone(),
@@ -180,6 +166,13 @@ impl Storage for NodeStorageServer {
                 Err(Status::new(Code::NotFound, "not found"))
             }
         }
+    }
+
+    async fn get_metadata(
+        &self,
+        request: Request<GetRequest>,
+    ) -> Result<Response<common::storage::Metadata>, Status> {
+        todo!()
     }
 
     async fn list_keys(
@@ -230,13 +223,6 @@ impl Storage for NodeStorageServer {
         &self,
         request: Request<MigrateToNewNodeRequest>,
     ) -> Result<Response<()>, Status> {
-        todo!()
-    }
-
-    async fn get_metadata(
-        &self,
-        request: Request<GetRequest>,
-    ) -> Result<Response<common::storage::Metadata>, Status> {
         todo!()
     }
 }

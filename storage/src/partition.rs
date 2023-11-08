@@ -10,19 +10,19 @@ use std::sync::Arc;
 use tracing::error;
 use uuid::Uuid;
 
-pub struct Namespace {
-    name: String,
-    partition_id: u32,
-    tenant_id: Uuid,
+pub struct Partition {
     db: Arc<DB>,
+    namespace_id: Uuid,
+    tenant_id: Uuid,
+    id: Uuid,
 }
 
-impl Debug for Namespace {
+impl Debug for Partition {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Namespace")
-            .field("name", &self.name)
+        f.debug_struct("Partition")
+            .field("namespace_id", &self.namespace_id)
             .field("tenant_id", &self.tenant_id)
-            .field("partition_id", &self.partition_id)
+            .field("id", &self.id)
             .finish()
     }
 }
@@ -75,19 +75,20 @@ impl<'a> ListOptions<'a> {
     }
 }
 
-impl Namespace {
+impl Partition {
     pub fn new<I>(
-        name: impl Into<String>,
-        partition_id: u32,
+        id: Uuid,
+        namespace_id: Uuid,
         tenant_id: Uuid,
         path: I,
-    ) -> Result<Namespace, Error>
+    ) -> Result<Partition, Error>
     where
         I: AsRef<Path>,
     {
-        let name = name.into();
         let mut options = Options::default();
         options.create_if_missing(true);
+        options.set_use_direct_io_for_flush_and_compaction(true);
+        options.set_use_direct_reads(true);
         options.create_missing_column_families(true);
 
         let db = DB::open_cf(
@@ -97,9 +98,9 @@ impl Namespace {
         )?;
 
         let db = Arc::new(db);
-        Ok(Namespace {
-            name,
-            partition_id,
+        Ok(Partition {
+            id,
+            namespace_id,
             tenant_id,
             db,
         })

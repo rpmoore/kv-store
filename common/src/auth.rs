@@ -217,7 +217,7 @@ impl From<AuthHeader> for MetadataMap {
     }
 }
 
-impl fmt::Debug for AuthHeader {
+impl Debug for AuthHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str("auth header")
     }

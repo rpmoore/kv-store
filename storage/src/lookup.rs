@@ -1,11 +1,12 @@
-use crate::namespace::Namespace;
+use crate::partition::Partition;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
-struct NamespaceLookup {}
+pub struct PartitionLookup {}
 
-impl NamespaceLookup {
-    fn get_namespace(&self, tenant_id: Uuid, namespace: &str) -> Option<Namespace> {
+impl PartitionLookup {
+    // Returns the partition that the key routes to using the consistent jump algorithm
+    pub fn get_partition_for_key(&self, tenant_id: Uuid, namespace_id: Uuid, key: &[u8]) -> Option<Partition> {
         None
     }
 }

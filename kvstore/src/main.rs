@@ -23,9 +23,13 @@ use tracing_actix_web::TracingLogger;
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use uuid::Uuid;
+use namespace::{NamespaceRepo, Namespace};
+use tenant::TenantRepo;
 
 mod auth;
 mod connections;
+mod namespace;
+mod tenant;
 
 const GIT_VERSION: &str = git_version!();
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -64,9 +68,10 @@ async fn main() -> Result<(), Error> {
     connection_manager.new_conn(client);
 
     let app_data = web::Data::new(AppData {
-        connection_manager,
+        namespaces: NamespaceRepo::new(pool.clone()),
         jwts,
-        db_pool: pool,
+        connection_manager,
+        tenants: TenantRepo::new(pool.clone())
     });
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
@@ -133,11 +138,11 @@ async fn create_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[derive(Debug)]
 struct AppData {
     connection_manager: ConnectionManager,
     jwts: auth::JwtIssuerVerifier,
-    db_pool: Pool<Sqlite>,
+    namespaces: NamespaceRepo,
+    tenants: TenantRepo
 }
 
 #[derive(Deserialize, Debug)]
@@ -200,27 +205,13 @@ struct GenTokenRequest {
     name: String,
 }
 
-#[derive(Debug)]
-struct Tenant {
-    name: String,
-    uuid: Uuid,
-}
-
-#[instrument]
+#[instrument(skip(app_data))]
 #[post("/tokens")]
 async fn gen_token(
     app_data: Data<AppData>,
     data: web::Json<GenTokenRequest>,
 ) -> Result<impl Responder, Box<dyn std::error::Error>> {
-    let tenant = match query("select name, uuid from tenants where name = ?")
-        .bind(&data.name)
-        .map(|row: SqliteRow| Tenant {
-            name: row.get(0),
-            uuid: Uuid::parse_str(row.get(1)).unwrap(),
-        })
-        .fetch_one(&app_data.db_pool)
-        .await
-    {
+    let tenant = match app_data.tenants.get(&data.name).await {
         Ok(tenant) => tenant,
         Err(err) => {
             error!(err = err.to_string(), "failed to get tenant information");
@@ -235,7 +226,7 @@ async fn gen_token(
     )
 }
 
-#[instrument(skip(auth_data, app_data))]
+#[instrument(skip(auth_data, app_data, path))]
 #[get("/namespaces/{namespace}/keys/{id}")]
 async fn get(
     path: web::Path<(String, String)>,
@@ -253,10 +244,13 @@ async fn get(
 
     info!(tenant_id = tenant_id.to_string(), "putting key");
 
-    // determine if namespace exists from the database
-    if !namespace_exists(&app_data.db_pool, tenant_id, &namespace).await {
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
-    }
+    let namespace = match app_data.namespaces.get(tenant_id, &namespace).await {
+        Ok(namespace) => namespace,
+        Err(err) => {
+            error!(err = err.to_string(), "failed to get namespace");
+            return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
+        }
+    };
 
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
@@ -265,7 +259,7 @@ async fn get(
         Extensions::default(),
         GetRequest {
             key: id.into_bytes(),
-            namespace,
+            namespace_id: namespace.id.to_string(),
             version: None,
         },
     );
@@ -288,22 +282,8 @@ async fn get(
     }
 }
 
-async fn namespace_exists(db_pool: &Pool<Sqlite>, tenant: Uuid, namespace: &str) -> bool {
-    match query("select exists(select * from namespaces left join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ? and namespaces.name = ?)")
-        .bind(tenant.to_string())
-        .bind(&namespace)
-        .map(|sqlite_row: SqliteRow| sqlite_row.get(0))
-        .fetch_one(db_pool)
-        .await {
-        Ok(exists) => exists,
-        Err(err) => {
-            error!(err = err.to_string(), "failed to determine if namespace exists");
-            false
-        }
-    }
-}
 
-#[instrument]
+#[instrument(skip(app_data, auth_data, path))]
 #[put("/namespaces/{namespace}/keys/{id}")]
 async fn put(
     path: web::Path<(String, String)>,
@@ -320,10 +300,13 @@ async fn put(
 
     let tenant_id = identity.tenant_id();
 
-    // determine if namespace exists from the database
-    if !namespace_exists(&app_data.db_pool, tenant_id, &namespace).await {
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
-    }
+    let namespace = match app_data.namespaces.get(tenant_id, &namespace).await {
+        Ok(namespace) => namespace,
+        Err(err) => {
+            error!(err = err.to_string(), "failed to get namespace");
+            return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
+        }
+    };
 
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
@@ -347,7 +330,7 @@ async fn put(
         metadata,
         Extensions::default(),
         PutRequest {
-            namespace: namespace.to_owned(),
+            namespace_id: namespace.id.to_string(),
             key: id.into_bytes(),
             crc: Some(crc),
             value: data.value.clone().into_bytes(),
@@ -387,15 +370,10 @@ async fn create_namespace(
     Ok(HttpResponseBuilder::new(StatusCode::NOT_IMPLEMENTED).finish())
 }
 
-#[derive(Serialize, Clone, Debug)]
-struct NamespaceResponse {
-    name: String,
-    id: Uuid,
-}
 
 #[derive(Serialize, Debug)]
 struct NamespacesResponse {
-    namespaces: Vec<NamespaceResponse>,
+    namespaces: Vec<Namespace>,
 }
 
 #[instrument(skip(app_data, auth_data))]
@@ -413,21 +391,15 @@ async fn list_namespaces(
 
     info!(tenant_id = tenant_id.to_string(), "fetching namespaces");
 
-    let namespaces = match query("select namespaces.name, namespaces.uuid from namespaces inner join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ?")
-        .bind(tenant_id.to_string())
-        .map(|row: SqliteRow| NamespaceResponse{
-            name: row.get(0),
-            id: Uuid::parse_str(row.get(1)).unwrap()
-        })
-        .fetch_all(&app_data.db_pool).await {
+    let namespaces = match app_data.namespaces.list(tenant_id).await {
         Ok(namespaces) => namespaces,
         Err(err) => {
-            error!(err = err.to_string());
-            return Ok(HttpResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR).finish())
+        error!(err = err.to_string());
+        return Ok(HttpResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR).finish())
         }
     };
 
-    Ok(HttpResponseBuilder::new(StatusCode::OK).json(namespaces))
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(NamespacesResponse{ namespaces}))
 }
 
 #[derive(Serialize, Debug)]
@@ -468,7 +440,7 @@ async fn list_keys(
         metadata,
         Extensions::default(),
         common::storage::ListKeysRequest {
-            namespace,
+            namespace_id: namespace,
             limit: None,
             start_key: None,
         },

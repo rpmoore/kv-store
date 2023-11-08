@@ -7,9 +7,9 @@ import "google/protobuf/empty.proto";
 // All Identity information needed for Authentication and Authorization is contained in the message headers
 
 message PutRequest {
-  bytes key = 1;
-  bytes value = 2;
-  string namespace = 3;
+  string namespace_id = 1;
+  bytes key = 2;
+  bytes value = 3;
   optional uint32 crc = 4;
 }
 
@@ -20,8 +20,8 @@ message PutResponse {
 }
 
 message GetRequest {
-  bytes key = 1;
-  string namespace = 2;
+  string namespace_id = 1;
+  bytes key = 2;
   optional uint32 version = 3;
 }
 
@@ -38,7 +38,7 @@ message GetResponse {
 }
 
 message DeleteKeyRequest {
-  string namespace = 1;
+  string namespace_id = 1;
   bytes key = 2;
 }
 
@@ -55,7 +55,7 @@ message MigrateToNewNodeRequest {
 }
 
 message ListKeysRequest {
-  string namespace = 1;
+  string namespace_id = 1;
   optional uint32 limit = 2;
   optional bytes startKey = 3;
 }
