@@ -3,8 +3,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .protoc_arg("--experimental_allow_proto3_optional")
-        .compile(&["proto/storage.proto", "proto/admin.proto"],
-        &["proto"]
-        )?;
+        .compile(&["proto/storage.proto", "proto/admin.proto"], &["proto"])?;
     Ok(())
 }

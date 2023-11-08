@@ -1,18 +1,18 @@
 use common::auth::{Identity, JwtIssuer, JwtValidator, RsaJwtIssuer, RsaJwtValidator};
-use uuid::Uuid;
 use jsonwebtoken::errors::Result;
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub(crate) struct JwtIssuerVerifier {
     verifier: RsaJwtValidator,
-    issuer: RsaJwtIssuer
+    issuer: RsaJwtIssuer,
 }
 
 impl JwtIssuerVerifier {
     pub fn new(private_key: &[u8], public_key_path: &[u8]) -> Result<JwtIssuerVerifier> {
         let issuer = RsaJwtIssuer::new(private_key)?;
         let verifier = RsaJwtValidator::new(public_key_path)?;
-        Ok(JwtIssuerVerifier{verifier, issuer })
+        Ok(JwtIssuerVerifier { verifier, issuer })
     }
 }
 

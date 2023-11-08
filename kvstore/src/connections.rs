@@ -1,9 +1,9 @@
-use tonic::transport::Channel;
 use common::storage::storage_client::StorageClient;
+use tonic::transport::Channel;
 
 #[derive(Debug, Default)]
 pub struct ConnectionManager {
-    connections: Vec<StorageClient<Channel>>
+    connections: Vec<StorageClient<Channel>>,
 }
 
 impl ConnectionManager {

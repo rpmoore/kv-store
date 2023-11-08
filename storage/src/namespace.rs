@@ -1,12 +1,14 @@
+use common::storage::KeyMetadata;
+use common::storage::Metadata;
+use rocksdb::{
+    Error, ErrorKind, IteratorMode, Options, WriteBatch, DB, DEFAULT_COLUMN_FAMILY_NAME,
+};
+use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
-use rocksdb::{DB, DEFAULT_COLUMN_FAMILY_NAME, Error, ErrorKind, IteratorMode, Options, WriteBatch};
-use std::sync::Arc;
 use std::path::Path;
-use serde::{Serialize, Deserialize};
+use std::sync::Arc;
 use tracing::error;
 use uuid::Uuid;
-use common::storage::Metadata;
-use common::storage::KeyMetadata;
 
 pub struct Namespace {
     name: String,
@@ -29,13 +31,18 @@ impl Debug for Namespace {
 pub struct PutValue<'a> {
     pub crc: u32,
     pub version: u32, // need to check to make sure the current version at least one above the current version, and if it is not, return a cas error
-    pub value: &'a[u8],
+    pub value: &'a [u8],
 }
 
 impl PutValue<'_> {
     // Might want to consider passing in the buffer that is stack allocated to fill instead of allocating a vec on the heap for this
     fn metadata_as_bytes(&self) -> Vec<u8> {
-        return vec!(self.crc.to_be_bytes().as_slice(), self.version.to_be_bytes().as_slice()).concat().to_vec()
+        return vec![
+            self.crc.to_be_bytes().as_slice(),
+            self.version.to_be_bytes().as_slice(),
+        ]
+        .concat()
+        .to_vec();
     }
 }
 
@@ -69,16 +76,33 @@ impl<'a> ListOptions<'a> {
 }
 
 impl Namespace {
-    pub fn new<I>(name: impl Into<String>, partition_id: u32, tenant_id: Uuid, path: I) -> Result<Namespace, Error> where I: AsRef<Path>{
-        let name =  name.into();
+    pub fn new<I>(
+        name: impl Into<String>,
+        partition_id: u32,
+        tenant_id: Uuid,
+        path: I,
+    ) -> Result<Namespace, Error>
+    where
+        I: AsRef<Path>,
+    {
+        let name = name.into();
         let mut options = Options::default();
         options.create_if_missing(true);
         options.create_missing_column_families(true);
 
-        let db = DB::open_cf(&options, &path, vec!(DEFAULT_COLUMN_FAMILY_NAME, "metadata"))?;
+        let db = DB::open_cf(
+            &options,
+            &path,
+            vec![DEFAULT_COLUMN_FAMILY_NAME, "metadata"],
+        )?;
 
-        let db= Arc::new(db);
-        Ok(Namespace{name, partition_id, tenant_id, db})
+        let db = Arc::new(db);
+        Ok(Namespace {
+            name,
+            partition_id,
+            tenant_id,
+            db,
+        })
     }
 
     //todo need to return a different error type here
@@ -86,35 +110,44 @@ impl Namespace {
         let metadata_handle = self.db.cf_handle("metadata").unwrap();
         let default_handle = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
 
-        let get_parts = self.db.multi_get_cf(vec!((&default_handle, key), (&metadata_handle, key)));
+        let get_parts = self
+            .db
+            .multi_get_cf(vec![(&default_handle, key), (&metadata_handle, key)]);
 
         let value: Box<[u8]> = match get_parts.get(0) {
             Some(Ok(Some(value))) => value.clone().into_boxed_slice(),
 
-            Some(Err(err)) => return {
-                error!(err = err.to_string(), "failed to get value");
-                return Err(err.kind())
-            },
+            Some(Err(err)) => {
+                return {
+                    error!(err = err.to_string(), "failed to get value");
+                    return Err(err.kind());
+                }
+            }
 
-            _ => return Err(ErrorKind::Incomplete)
+            _ => return Err(ErrorKind::Incomplete),
         };
 
         let (crc, version) = match get_parts.get(1) {
             Some(Ok(Some(value))) => {
                 let (crc, version) = value.split_at(4);
-                (u32::from_be_bytes(crc.try_into().unwrap()), u32::from_be_bytes(version.try_into().unwrap()))
-            },
-            Some(Err(err)) => return {
-                error!(err = err.to_string(), "failed to get value");
-                return Err(err.kind())
-            },
-            _ => return Err(ErrorKind::Incomplete)
+                (
+                    u32::from_be_bytes(crc.try_into().unwrap()),
+                    u32::from_be_bytes(version.try_into().unwrap()),
+                )
+            }
+            Some(Err(err)) => {
+                return {
+                    error!(err = err.to_string(), "failed to get value");
+                    return Err(err.kind());
+                }
+            }
+            _ => return Err(ErrorKind::Incomplete),
         };
 
         Ok(GetValue {
             crc,
             version,
-            value
+            value,
         })
     }
 
@@ -126,7 +159,7 @@ impl Namespace {
         batch.put(key, value.value);
 
         self.db.write(batch).map_err(|err| {
-            error!{err = err.to_string(), "failed to write value"};
+            error! {err = err.to_string(), "failed to write value"};
             err.kind()
         })?;
 
@@ -141,29 +174,37 @@ impl Namespace {
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
-        self.db.delete(key)
+        let cf_handle = self.db.cf_handle("metadata").unwrap();
+        let mut batch = WriteBatch::default();
+        batch.delete_cf(&cf_handle, key);
+        batch.delete(key);
+
+        self.db.write(batch)
     }
 
     pub fn list_keys(&self, opts: ListOptions) -> Result<Box<[KeyMetadata]>, Error> {
         let cf_handle = self.db.cf_handle("metadata").unwrap();
 
         let iter = match opts.start_at {
-            Some(start_at) => self.db.iterator_cf(&cf_handle, IteratorMode::From(start_at.as_bytes(), rocksdb::Direction::Forward)),
-            None =>self.db.iterator_cf(&cf_handle, IteratorMode::Start)
+            Some(start_at) => self.db.iterator_cf(
+                &cf_handle,
+                IteratorMode::From(start_at.as_bytes(), rocksdb::Direction::Forward),
+            ),
+            None => self.db.iterator_cf(&cf_handle, IteratorMode::Start),
         };
 
         let mut results = Vec::new();
 
         for item in iter.take(opts.limit.unwrap_or(50)) {
             let (key, metadata) = item?;
-            results.push(KeyMetadata{
+            results.push(KeyMetadata {
                 key: key.to_vec(),
                 metadata: Some(Metadata {
                     crc: u32::from_be_bytes(metadata[..4].try_into().unwrap()),
                     version: u32::from_be_bytes(metadata[4..].try_into().unwrap()),
                     creation_time: None,
-
-                })});
+                }),
+            });
         }
 
         Ok(results.into_boxed_slice())

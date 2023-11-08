@@ -1,19 +1,21 @@
-use std::collections::HashSet;
-use std::fmt;
-use std::fmt::{Debug, Display, Formatter, Write};
-use std::io::ErrorKind;
 use actix_web::error::ParseError;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderName, HeaderValue, InvalidHeaderValue, TryIntoHeaderValue};
 use actix_web::HttpMessage;
-use uuid::Uuid;
-use std::sync::Arc;
-use sha2::{Sha384, Digest};
-use base64::{Engine as _, engine::general_purpose};
-use tracing::{error, instrument};
-use jsonwebtoken::{encode, Header, Algorithm, EncodingKey, decode, DecodingKey, errors, Validation};
+use base64::{engine::general_purpose, Engine as _};
+use jsonwebtoken::{
+    decode, encode, errors, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use serde::{Deserialize, Serialize, Serializer};
+use sha2::{Digest, Sha384};
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::{Debug, Display, Formatter, Write};
+use std::io::ErrorKind;
+use std::sync::Arc;
 use tonic::metadata::{MetadataMap, MetadataValue};
+use tracing::{error, instrument};
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -26,7 +28,10 @@ struct Claims {
 pub struct Token(Arc<str>);
 
 impl Serialize for Token {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         serializer.serialize_str(self.as_ref())
     }
 }
@@ -80,12 +85,11 @@ pub struct RsaJwtIssuer {
 }
 
 impl RsaJwtIssuer {
-    pub fn new(rsa_private_key: &[u8]) -> errors::Result<RsaJwtIssuer> { // replace with our own error type
+    pub fn new(rsa_private_key: &[u8]) -> errors::Result<RsaJwtIssuer> {
+        // replace with our own error type
         let private_key = EncodingKey::from_rsa_pem(rsa_private_key)?;
 
-        Ok(RsaJwtIssuer {
-            private_key
-        })
+        Ok(RsaJwtIssuer { private_key })
     }
 }
 
@@ -96,14 +100,13 @@ impl JwtIssuer for RsaJwtIssuer {
             sub: tenant_id,
             company: "my own".to_owned(),
             iss: "kvstore".to_owned(),
-
         };
         let token = encode(&Header::new(Algorithm::RS256), &claims, &self.private_key)?;
 
-        return Ok(Identity{
+        return Ok(Identity {
             token: Token(token.into()),
             claims,
-        })
+        });
     }
 }
 
@@ -119,7 +122,7 @@ pub trait JwtValidator {
 
 #[derive(Clone)]
 pub struct RsaJwtValidator {
-    public_key: DecodingKey
+    public_key: DecodingKey,
 }
 
 impl fmt::Debug for RsaJwtValidator {
@@ -129,12 +132,11 @@ impl fmt::Debug for RsaJwtValidator {
 }
 
 impl RsaJwtValidator {
-    pub fn new(rsa_public_key: &[u8]) -> errors::Result<RsaJwtValidator> { // replace with our own error type
+    pub fn new(rsa_public_key: &[u8]) -> errors::Result<RsaJwtValidator> {
+        // replace with our own error type
         let public_key = DecodingKey::from_rsa_pem(rsa_public_key)?;
 
-        Ok(RsaJwtValidator {
-            public_key,
-        })
+        Ok(RsaJwtValidator { public_key })
     }
 }
 
@@ -148,12 +150,15 @@ impl JwtValidator for RsaJwtValidator {
 
         let token = decode::<Claims>(&token_str, &self.public_key, &validation)?;
 
-        Ok(Identity { token: Token(token_str.into()), claims: token.claims})
+        Ok(Identity {
+            token: Token(token_str.into()),
+            claims: token.claims,
+        })
     }
 }
 
 pub struct AuthHeader {
-    bearer: String
+    bearer: String,
 }
 
 impl From<AuthHeader> for String {
@@ -172,16 +177,23 @@ impl TryFrom<&MetadataMap> for AuthHeader {
     type Error = ErrorKind;
 
     fn try_from(value: &MetadataMap) -> Result<Self, Self::Error> {
-        value.get("Authorization")
+        value
+            .get("Authorization")
             .ok_or(ErrorKind::NotFound)
-            .and_then(|header| header.to_str().map_err(|err|{
-                error!(err = err.to_string(), "failed to get auth header");
-                ErrorKind::NotFound
-            } ))
-            .and_then(|auth|auth.split_ascii_whitespace()
-                .nth(1)
-                .ok_or(ErrorKind::NotFound)
-            ).map(|token| AuthHeader{bearer:token.to_string()})
+            .and_then(|header| {
+                header.to_str().map_err(|err| {
+                    error!(err = err.to_string(), "failed to get auth header");
+                    ErrorKind::NotFound
+                })
+            })
+            .and_then(|auth| {
+                auth.split_ascii_whitespace()
+                    .nth(1)
+                    .ok_or(ErrorKind::NotFound)
+            })
+            .map(|token| AuthHeader {
+                bearer: token.to_string(),
+            })
     }
 }
 
@@ -193,9 +205,12 @@ impl From<AuthHeader> for MetadataMap {
             Ok(value) => {
                 map.append(header::AUTHORIZATION.as_str(), value);
                 map
-            },
+            }
             Err(err) => {
-                error!(err = err.to_string(), "failed to append authorization header");
+                error!(
+                    err = err.to_string(),
+                    "failed to append authorization header"
+                );
                 map
             }
         }
@@ -223,18 +238,27 @@ impl header::Header for AuthHeader {
 
     fn parse<M: HttpMessage>(msg: &M) -> Result<Self, ParseError> {
         match msg.headers().get(header::AUTHORIZATION) {
-            Some(auth_header) => match auth_header.to_str().map_err(|err| {
-                error!(err = err.to_string(), "failed to get auth header");
-                ParseError::Header
-            }
-            ).and_then(|value| value.split_ascii_whitespace().nth(1).ok_or(ParseError::Header)) {
-                Ok(auth) => Ok(AuthHeader{bearer: String::from(auth)}),
-                Err(err)=> {
-                    error!{err = err.to_string(), "failed to get auth header"}
+            Some(auth_header) => match auth_header
+                .to_str()
+                .map_err(|err| {
+                    error!(err = err.to_string(), "failed to get auth header");
+                    ParseError::Header
+                })
+                .and_then(|value| {
+                    value
+                        .split_ascii_whitespace()
+                        .nth(1)
+                        .ok_or(ParseError::Header)
+                }) {
+                Ok(auth) => Ok(AuthHeader {
+                    bearer: String::from(auth),
+                }),
+                Err(err) => {
+                    error! {err = err.to_string(), "failed to get auth header"}
                     Err(ParseError::Header)
                 }
             },
-            None => Err(ParseError::Header)
+            None => Err(ParseError::Header),
         }
     }
 }

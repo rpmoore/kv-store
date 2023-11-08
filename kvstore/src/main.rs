@@ -1,28 +1,31 @@
-use std::io::{Error, ErrorKind};
-use common::storage::{GetRequest, KeyMetadata, PutRequest, storage_client::StorageClient};
-use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, post, put, Responder, web};
+use crate::connections::ConnectionManager;
 use actix_web::http::StatusCode;
 use actix_web::web::Data;
+use actix_web::{
+    body::BoxBody, error, get, http::header::ContentType, middleware, post, put, web, App,
+    HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, Responder,
+};
+use common::auth::{JwtIssuer, JwtValidator};
+use common::storage::{storage_client::StorageClient, GetRequest, KeyMetadata, PutRequest};
 use const_format::formatcp;
-use serde::{Deserialize, Serialize};
+use crc32fast::Hasher;
 use derive_more::{Display, Error};
+use futures::{try_join, TryStreamExt};
+use git_version::git_version;
+use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
+use sqlx::{migrate::MigrateDatabase, query, Pool, Row};
+use std::io::{Error, ErrorKind};
 use tonic::transport::Channel;
-use crate::connections::ConnectionManager;
-use tracing_actix_web::TracingLogger;
+use tonic::Extensions;
 use tracing::{error, info, Level};
+use tracing_actix_web::TracingLogger;
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
-use futures::{try_join, TryStreamExt};
-use tonic::Extensions;
-use common::auth::{JwtIssuer, JwtValidator};
 use uuid::Uuid;
-use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
-use sqlx::{migrate::MigrateDatabase, Pool, query, Row};
-use crc32fast::Hasher;
-use git_version::git_version;
 
-mod connections;
 mod auth;
+mod connections;
 
 const GIT_VERSION: &str = git_version!();
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -41,10 +44,11 @@ async fn main() -> Result<(), Error> {
 
     let private_key = common::read_file_bytes("key.pem")?;
     let public_key = common::read_file_bytes("key.pub")?;
-    let jwts = auth::JwtIssuerVerifier::new(private_key.as_slice(), public_key.as_slice()).map_err(|err| {
-        error!{err = err.to_string(), "failed to parse key"};
-        ErrorKind::InvalidData
-    })?;
+    let jwts = auth::JwtIssuerVerifier::new(private_key.as_slice(), public_key.as_slice())
+        .map_err(|err| {
+            error! {err = err.to_string(), "failed to parse key"};
+            ErrorKind::InvalidData
+        })?;
 
     let pool = create_db_pool("sqlite://data.db").await?;
 
@@ -59,22 +63,30 @@ async fn main() -> Result<(), Error> {
     let mut connection_manager = connections::ConnectionManager::default();
     connection_manager.new_conn(client);
 
-    let app_data = web::Data::new(AppData{connection_manager, jwts, db_pool: pool});
+    let app_data = web::Data::new(AppData {
+        connection_manager,
+        jwts,
+        db_pool: pool,
+    });
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
 
-    let server =  HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default())
-        .wrap(middleware::DefaultHeaders::new().add(("User-Agent", USER_AGENT)))
-        .service(put)
-        .service(gen_token)
-        .service(list_namespaces)
-        .service(get)
-        .service(list_keys)
-    )
-        .bind(("0.0.0.0", 8080)).unwrap()
-        .run();
+    let server = HttpServer::new(move || {
+        App::new()
+            .app_data(app_data.clone())
+            .wrap(TracingLogger::default())
+            .wrap(middleware::DefaultHeaders::new().add(("User-Agent", USER_AGENT)))
+            .service(put)
+            .service(gen_token)
+            .service(list_namespaces)
+            .service(get)
+            .service(list_keys)
+    })
+    .bind(("0.0.0.0", 8080))
+    .unwrap()
+    .run();
 
-    try_join!(healthcheck, server).map(|(_,_)| ())
+    try_join!(healthcheck, server).map(|(_, _)| ())
 }
 
 async fn create_db_pool(path: &str) -> Result<Pool<Sqlite>, ErrorKind> {
@@ -89,10 +101,13 @@ async fn create_db_pool(path: &str) -> Result<Pool<Sqlite>, ErrorKind> {
         }
     }
 
-    let pool = SqlitePoolOptions::new().connect(path).await.map_err(|err| {
-        error!{err = err.to_string(), "failed to connect to db"};
-        ErrorKind::NotFound
-    })?;
+    let pool = SqlitePoolOptions::new()
+        .connect(path)
+        .await
+        .map_err(|err| {
+            error! {err = err.to_string(), "failed to connect to db"};
+            ErrorKind::NotFound
+        })?;
     Ok(pool)
 }
 
@@ -100,10 +115,21 @@ async fn create_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     query("create table if not exists namespaces (id integer primary key autoincrement, uuid varchar(36), name varchar(255), tenant_id integer, unique(tenant_id, name), foreign key(tenant_id) references tenants(id))").execute(pool).await?;
     query("create table if not exists storage_targets (id integer primary key autoincrement, namespace_id integer, endpoint varchar(255))").execute(pool).await?;
     query("create table if not exists tenants(id integer primary key autoincrement, uuid varchar(36), name varchar(255), password_hash varchar(255), unique(name), unique(uuid))").execute(pool).await?;
-    let Some::<u32>(user_id) = query("insert or ignore into tenants (name, uuid) values ('dev', ?) returning id").bind(Uuid::new_v4().to_string()).map(|row :SqliteRow| row.get(0)).fetch(pool).try_next().await? else {
-        return Ok(())
+    let Some::<u32>(user_id) =
+        query("insert or ignore into tenants (name, uuid) values ('dev', ?) returning id")
+            .bind(Uuid::new_v4().to_string())
+            .map(|row: SqliteRow| row.get(0))
+            .fetch(pool)
+            .try_next()
+            .await?
+    else {
+        return Ok(());
     };
-    query("insert or ignore into namespaces (name, uuid, tenant_id) values('dev', ?, ?)").bind(Uuid::new_v4().to_string()).bind(user_id).execute(pool).await?;
+    query("insert or ignore into namespaces (name, uuid, tenant_id) values('dev', ?, ?)")
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -111,7 +137,7 @@ async fn create_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
 struct AppData {
     connection_manager: ConnectionManager,
     jwts: auth::JwtIssuerVerifier,
-    db_pool: Pool<Sqlite>
+    db_pool: Pool<Sqlite>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -142,11 +168,11 @@ impl Responder for PutResp {
 
 #[derive(Error, Display, Debug)]
 enum KVErrors {
-    #[display(fmt="downstream service unavailable")]
+    #[display(fmt = "downstream service unavailable")]
     ServiceUnavailable,
 
-    #[display(fmt="internal server error")]
-    InternalServerError
+    #[display(fmt = "internal server error")]
+    InternalServerError,
 }
 
 impl error::ResponseError for KVErrors {
@@ -166,45 +192,60 @@ impl error::ResponseError for KVErrors {
 
 #[derive(Serialize, Debug)]
 struct GenTokenResponse {
-    token: common::auth::Token
+    token: common::auth::Token,
 }
 
 #[derive(Deserialize, Debug)]
 struct GenTokenRequest {
-    name: String
+    name: String,
 }
 
 #[derive(Debug)]
 struct Tenant {
     name: String,
-    uuid: Uuid
+    uuid: Uuid,
 }
 
 #[instrument]
 #[post("/tokens")]
-async fn gen_token(app_data: Data<AppData>, data: web::Json<GenTokenRequest>) -> Result<impl Responder, Box<dyn std::error::Error>> {
+async fn gen_token(
+    app_data: Data<AppData>,
+    data: web::Json<GenTokenRequest>,
+) -> Result<impl Responder, Box<dyn std::error::Error>> {
     let tenant = match query("select name, uuid from tenants where name = ?")
         .bind(&data.name)
-        .map(|row: SqliteRow| Tenant{ name: row.get(0), uuid: Uuid::parse_str(row.get(1)).unwrap()} )
-        .fetch_one(&app_data.db_pool).await {
+        .map(|row: SqliteRow| Tenant {
+            name: row.get(0),
+            uuid: Uuid::parse_str(row.get(1)).unwrap(),
+        })
+        .fetch_one(&app_data.db_pool)
+        .await
+    {
         Ok(tenant) => tenant,
         Err(err) => {
             error!(err = err.to_string(), "failed to get tenant information");
-            return Ok(HttpResponseBuilder::new(StatusCode::BAD_REQUEST).finish())
+            return Ok(HttpResponseBuilder::new(StatusCode::BAD_REQUEST).finish());
         }
     };
     let token = app_data.jwts.new_identity(tenant.uuid)?;
-    Ok(HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse{token:token.token()}))
+    Ok(
+        HttpResponseBuilder::new(StatusCode::OK).json(GenTokenResponse {
+            token: token.token(),
+        }),
+    )
 }
-
 
 #[instrument(skip(auth_data, app_data))]
 #[get("/namespaces/{namespace}/keys/{id}")]
-async fn get(path: web::Path<(String, String)>, app_data : Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn get(
+    path: web::Path<(String, String)>,
+    app_data: Data<AppData>,
+    auth_data: web::Header<common::auth::AuthHeader>,
+) -> Result<impl Responder, KVErrors> {
     let (namespace, id) = path.into_inner();
     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
         error!("failed to verify auth data");
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     };
     let metadata = auth_data.into_inner().into();
 
@@ -213,24 +254,32 @@ async fn get(path: web::Path<(String, String)>, app_data : Data<AppData>, auth_d
     info!(tenant_id = tenant_id.to_string(), "putting key");
 
     // determine if namespace exists from the database
-    if !namespace_exists(&app_data.db_pool, tenant_id,  &namespace).await {
+    if !namespace_exists(&app_data.db_pool, tenant_id, &namespace).await {
         return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     }
 
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
-    let request = tonic::Request::from_parts(metadata, Extensions::default(), GetRequest{
-        key: id.into_bytes(),
-        namespace,
-        version: None,
-    });
+    let request = tonic::Request::from_parts(
+        metadata,
+        Extensions::default(),
+        GetRequest {
+            key: id.into_bytes(),
+            namespace,
+            version: None,
+        },
+    );
 
     match client.get(request).await {
         Ok(response) => {
             let response = response.get_ref();
 
             let response_metadata = response.metadata.as_ref().unwrap();
-            Ok(HttpResponseBuilder::new(StatusCode::OK).append_header(("version", response_metadata.version.to_string())).append_header(("crc", response_metadata.crc.to_string())).content_type("plain/text").body(response.value.clone()))
+            Ok(HttpResponseBuilder::new(StatusCode::OK)
+                .append_header(("version", response_metadata.version.to_string()))
+                .append_header(("crc", response_metadata.crc.to_string()))
+                .content_type("plain/text")
+                .body(response.value.clone()))
         }
         Err(err) => {
             error!(err = err.to_string(), "failed to get key");
@@ -256,18 +305,23 @@ async fn namespace_exists(db_pool: &Pool<Sqlite>, tenant: Uuid, namespace: &str)
 
 #[instrument]
 #[put("/namespaces/{namespace}/keys/{id}")]
-async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn put(
+    path: web::Path<(String, String)>,
+    data: web::Json<PutValue>,
+    app_data: web::Data<AppData>,
+    auth_data: web::Header<common::auth::AuthHeader>,
+) -> Result<impl Responder, KVErrors> {
     let (namespace, id) = path.into_inner();
-     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
+    let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
         error!("failed to verify auth data");
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     };
     let metadata = auth_data.into_inner().into();
 
     let tenant_id = identity.tenant_id();
 
     // determine if namespace exists from the database
-    if !namespace_exists(&app_data.db_pool, tenant_id,  &namespace).await {
+    if !namespace_exists(&app_data.db_pool, tenant_id, &namespace).await {
         return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     }
 
@@ -285,60 +339,74 @@ async fn put(path: web::Path<(String, String)>, data: web::Json<PutValue>, app_d
             if crc != crc {
                 return Ok(HttpResponseBuilder::new(StatusCode::BAD_REQUEST).finish());
             }
-        },
+        }
         None => {}
     }
 
-    let request = tonic::Request::from_parts(metadata, Extensions::default(),PutRequest {
-        namespace: namespace.to_owned(),
-        key: id.into_bytes(),
-        crc: Some(crc),
-        value: data.value.clone().into_bytes(),
-    });
+    let request = tonic::Request::from_parts(
+        metadata,
+        Extensions::default(),
+        PutRequest {
+            namespace: namespace.to_owned(),
+            key: id.into_bytes(),
+            crc: Some(crc),
+            value: data.value.clone().into_bytes(),
+        },
+    );
 
     let put_response = match client.put(request).await {
         Ok(response) => response.into_inner(),
         Err(err) => {
             error!(err = err.to_string(), "failed to put value");
-            return Err(KVErrors::InternalServerError)
+            return Err(KVErrors::InternalServerError);
         }
     };
 
-    Ok(HttpResponseBuilder::new(StatusCode::OK).json(PutResp{
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(PutResp {
         version: put_response.version,
         crc: put_response.crc,
-        creation_time: put_response.creation_time.map_or(String::from(""), |timestamp| timestamp.to_string())
+        creation_time: put_response
+            .creation_time
+            .map_or(String::from(""), |timestamp| timestamp.to_string()),
     }))
 }
 
 #[derive(Deserialize, Clone, Debug)]
 struct CreateNamespace {
-    name: String
+    name: String,
 }
 
 //#[instrument]
 #[post("/namespaces")]
-async fn create_namespace(path: web::Path<(String, String)>, data: web::Json<CreateNamespace>, app_data : web::Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn create_namespace(
+    path: web::Path<(String, String)>,
+    data: web::Json<CreateNamespace>,
+    app_data: web::Data<AppData>,
+    auth_data: web::Header<common::auth::AuthHeader>,
+) -> Result<impl Responder, KVErrors> {
     Ok(HttpResponseBuilder::new(StatusCode::NOT_IMPLEMENTED).finish())
 }
 
 #[derive(Serialize, Clone, Debug)]
 struct NamespaceResponse {
     name: String,
-    id: Uuid
+    id: Uuid,
 }
 
 #[derive(Serialize, Debug)]
 struct NamespacesResponse {
-    namespaces: Vec<NamespaceResponse>
+    namespaces: Vec<NamespaceResponse>,
 }
 
 #[instrument(skip(app_data, auth_data))]
 #[get("/namespaces")]
-async fn list_namespaces(app_data : Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn list_namespaces(
+    app_data: Data<AppData>,
+    auth_data: web::Header<common::auth::AuthHeader>,
+) -> Result<impl Responder, KVErrors> {
     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
         error!("failed to verify auth data");
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     };
 
     let tenant_id = identity.tenant_id();
@@ -367,21 +435,25 @@ struct ListKeyMetadata {
     name: String,
     version: u32,
     crc: u32,
-    creation_time: Option<u64>
+    creation_time: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
 struct ListKeysResponse {
-    keys: Vec<ListKeyMetadata>
+    keys: Vec<ListKeyMetadata>,
 }
 
 #[instrument(skip(app_data, auth_data))]
 #[get("/namespaces/{namespace}/keys")]
-async fn list_keys(path: web::Path<String>,app_data: Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+async fn list_keys(
+    path: web::Path<String>,
+    app_data: Data<AppData>,
+    auth_data: web::Header<common::auth::AuthHeader>,
+) -> Result<impl Responder, KVErrors> {
     let namespace = path.into_inner();
     let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
         error!("failed to verify auth data");
-        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
     };
 
     let tenant_id = identity.tenant_id();
@@ -392,17 +464,21 @@ async fn list_keys(path: web::Path<String>,app_data: Data<AppData>, auth_data: w
 
     let metadata = auth_data.into_inner().into();
 
-    let request = tonic::Request::from_parts(metadata, Extensions::default(), common::storage::ListKeysRequest{
-        namespace,
-        limit: None,
-        start_key: None,
-    });
+    let request = tonic::Request::from_parts(
+        metadata,
+        Extensions::default(),
+        common::storage::ListKeysRequest {
+            namespace,
+            limit: None,
+            start_key: None,
+        },
+    );
 
     let response = match client.list_keys(request).await {
         Ok(response) => response.into_inner(),
         Err(err) => {
             error!(err = err.to_string(), "failed to list keys");
-            return Err(KVErrors::InternalServerError)
+            return Err(KVErrors::InternalServerError);
         }
     };
 
@@ -411,18 +487,18 @@ async fn list_keys(path: web::Path<String>,app_data: Data<AppData>, auth_data: w
     for item in response.keys {
         let metadata = item.metadata.as_ref().unwrap();
 
-        result.push(ListKeyMetadata{
+        result.push(ListKeyMetadata {
             name: String::from_utf8(item.key).map_err(|err| {
                 error!(err = err.to_string(), "failed to map key");
-                return KVErrors::InternalServerError
+                return KVErrors::InternalServerError;
             })?,
             version: metadata.version,
             crc: metadata.crc,
-            creation_time: None
+            creation_time: None,
         })
     }
 
-    let response = ListKeysResponse{keys: result};
+    let response = ListKeysResponse { keys: result };
 
     Ok(HttpResponseBuilder::new(StatusCode::OK).json(response))
 }
