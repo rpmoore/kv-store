@@ -1,10 +1,12 @@
 use std::fmt::{Debug, Formatter};
-use rocksdb::{DB, DEFAULT_COLUMN_FAMILY_NAME, Error, ErrorKind, Options, WriteBatch};
+use rocksdb::{DB, DEFAULT_COLUMN_FAMILY_NAME, Error, ErrorKind, IteratorMode, Options, WriteBatch};
 use std::sync::Arc;
 use std::path::Path;
 use serde::{Serialize, Deserialize};
 use tracing::error;
 use uuid::Uuid;
+use common::storage::Metadata;
+use common::storage::KeyMetadata;
 
 pub struct Namespace {
     name: String,
@@ -47,6 +49,25 @@ pub struct GetValue {
     pub version: u32, // need to check to make sure the current version at least one above the current version, and if it is not, return a cas error
     pub value: Box<[u8]>,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct ListOptions<'a> {
+    limit: Option<usize>,
+    start_at: Option<&'a str>,
+}
+
+impl<'a> ListOptions<'a> {
+    pub fn with_limit(&mut self, limit: usize) -> &mut Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn with_start_at(&mut self, start_at: &'a str) -> &mut Self {
+        self.start_at = Some(start_at);
+        self
+    }
+}
+
 impl Namespace {
     pub fn new<I>(name: impl Into<String>, partition_id: u32, tenant_id: Uuid, path: I) -> Result<Namespace, Error> where I: AsRef<Path>{
         let name =  name.into();
@@ -121,5 +142,30 @@ impl Namespace {
 
     pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
         self.db.delete(key)
+    }
+
+    pub fn list_keys(&self, opts: ListOptions) -> Result<Box<[KeyMetadata]>, Error> {
+        let cf_handle = self.db.cf_handle("metadata").unwrap();
+
+        let iter = match opts.start_at {
+            Some(start_at) => self.db.iterator_cf(&cf_handle, IteratorMode::From(start_at.as_bytes(), rocksdb::Direction::Forward)),
+            None =>self.db.iterator_cf(&cf_handle, IteratorMode::Start)
+        };
+
+        let mut results = Vec::new();
+
+        for item in iter.take(opts.limit.unwrap_or(50)) {
+            let (key, metadata) = item?;
+            results.push(KeyMetadata{
+                key: key.to_vec(),
+                metadata: Some(Metadata {
+                    crc: u32::from_be_bytes(metadata[..4].try_into().unwrap()),
+                    version: u32::from_be_bytes(metadata[4..].try_into().unwrap()),
+                    creation_time: None,
+
+                })});
+        }
+
+        Ok(results.into_boxed_slice())
     }
 }

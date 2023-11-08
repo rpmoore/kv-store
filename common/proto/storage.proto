@@ -25,12 +25,16 @@ message GetRequest {
   optional uint32 version = 3;
 }
 
+message Metadata {
+  google.protobuf.Timestamp creationTime = 1;
+  uint32 version = 2;
+  uint32 crc = 3;
+}
+
 message GetResponse {
   bytes key = 1;
   bytes value = 2;
-  google.protobuf.Timestamp creationTime = 3;
-  uint32 version = 4;
-  uint32 crc = 5;
+  Metadata metadata = 3;
 }
 
 message DeleteKeyRequest {
@@ -52,10 +56,17 @@ message MigrateToNewNodeRequest {
 
 message ListKeysRequest {
   string namespace = 1;
+  optional uint32 limit = 2;
+  optional bytes startKey = 3;
+}
+
+message KeyMetadata {
+  bytes key = 1;
+  Metadata metadata = 2;
 }
 
 message ListKeysResponse {
-  repeated bytes key = 1; // might want to consider returning some metadata here
+  repeated KeyMetadata keys = 1; // might want to consider returning some metadata here
 }
 
 service Storage {
@@ -63,6 +74,7 @@ service Storage {
   rpc DeleteNamespace(DeleteNamespaceRequest) returns (google.protobuf.Empty);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  rpc GetMetadata(GetRequest) returns (Metadata);
   rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
   rpc Delete(DeleteKeyRequest) returns (google.protobuf.Empty);
   rpc MigrateToNewNode(MigrateToNewNodeRequest) returns (google.protobuf.Empty);

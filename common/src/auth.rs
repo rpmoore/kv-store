@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::fmt::{Display, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::io::ErrorKind;
 use actix_web::error::ParseError;
 use actix_web::http::header;
@@ -22,7 +22,7 @@ struct Claims {
     iss: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Token(Arc<str>);
 
 impl Serialize for Token {
@@ -46,6 +46,12 @@ impl Display for Token {
         let result = hasher.finalize();
         f.write_str(general_purpose::STANDARD_NO_PAD.encode(result).as_str())?;
         Ok(())
+    }
+}
+
+impl Debug for Token {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, f)
     }
 }
 

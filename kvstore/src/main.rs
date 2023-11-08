@@ -1,8 +1,9 @@
 use std::io::{Error, ErrorKind};
-use common::storage::{GetRequest, PutRequest, storage_client::StorageClient};
-use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, post, put, Responder, web};
+use common::storage::{GetRequest, KeyMetadata, PutRequest, storage_client::StorageClient};
+use actix_web::{App, body::BoxBody, error, get, http::header::ContentType, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, post, put, Responder, web};
 use actix_web::http::StatusCode;
 use actix_web::web::Data;
+use const_format::formatcp;
 use serde::{Deserialize, Serialize};
 use derive_more::{Display, Error};
 use tonic::transport::Channel;
@@ -18,9 +19,15 @@ use uuid::Uuid;
 use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
 use sqlx::{migrate::MigrateDatabase, Pool, query, Row};
 use crc32fast::Hasher;
+use git_version::git_version;
 
 mod connections;
 mod auth;
+
+const GIT_VERSION: &str = git_version!();
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USER_AGENT: &str = formatcp!("kvstore/{} - {}", VERSION, GIT_VERSION);
 
 #[actix_web::main]
 async fn main() -> Result<(), Error> {
@@ -57,10 +64,12 @@ async fn main() -> Result<(), Error> {
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
 
     let server =  HttpServer::new(move || App::new().app_data(app_data.clone()).wrap(TracingLogger::default())
+        .wrap(middleware::DefaultHeaders::new().add(("User-Agent", USER_AGENT)))
         .service(put)
         .service(gen_token)
         .service(list_namespaces)
         .service(get)
+        .service(list_keys)
     )
         .bind(("0.0.0.0", 8080)).unwrap()
         .run();
@@ -220,7 +229,8 @@ async fn get(path: web::Path<(String, String)>, app_data : Data<AppData>, auth_d
         Ok(response) => {
             let response = response.get_ref();
 
-            Ok(HttpResponseBuilder::new(StatusCode::OK).append_header(("version", response.version.to_string())).append_header(("crc",response.crc.to_string())).content_type("plain/text").body(response.value.clone()))
+            let response_metadata = response.metadata.as_ref().unwrap();
+            Ok(HttpResponseBuilder::new(StatusCode::OK).append_header(("version", response_metadata.version.to_string())).append_header(("crc", response_metadata.crc.to_string())).content_type("plain/text").body(response.value.clone()))
         }
         Err(err) => {
             error!(err = err.to_string(), "failed to get key");
@@ -352,3 +362,67 @@ async fn list_namespaces(app_data : Data<AppData>, auth_data: web::Header<common
     Ok(HttpResponseBuilder::new(StatusCode::OK).json(namespaces))
 }
 
+#[derive(Serialize, Debug)]
+struct ListKeyMetadata {
+    name: String,
+    version: u32,
+    crc: u32,
+    creation_time: Option<u64>
+}
+
+#[derive(Serialize, Debug)]
+struct ListKeysResponse {
+    keys: Vec<ListKeyMetadata>
+}
+
+#[instrument(skip(app_data, auth_data))]
+#[get("/namespaces/{namespace}/keys")]
+async fn list_keys(path: web::Path<String>,app_data: Data<AppData>, auth_data: web::Header<common::auth::AuthHeader>) -> Result<impl Responder, KVErrors> {
+    let namespace = path.into_inner();
+    let Ok(identity) = app_data.jwts.parse(auth_data.as_ref()) else {
+        error!("failed to verify auth data");
+        return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish())
+    };
+
+    let tenant_id = identity.tenant_id();
+
+    info!(tenant_id = tenant_id.to_string(), "fetching keys");
+
+    let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
+
+    let metadata = auth_data.into_inner().into();
+
+    let request = tonic::Request::from_parts(metadata, Extensions::default(), common::storage::ListKeysRequest{
+        namespace,
+        limit: None,
+        start_key: None,
+    });
+
+    let response = match client.list_keys(request).await {
+        Ok(response) => response.into_inner(),
+        Err(err) => {
+            error!(err = err.to_string(), "failed to list keys");
+            return Err(KVErrors::InternalServerError)
+        }
+    };
+
+    let mut result = Vec::new();
+
+    for item in response.keys {
+        let metadata = item.metadata.as_ref().unwrap();
+
+        result.push(ListKeyMetadata{
+            name: String::from_utf8(item.key).map_err(|err| {
+                error!(err = err.to_string(), "failed to map key");
+                return KVErrors::InternalServerError
+            })?,
+            version: metadata.version,
+            crc: metadata.crc,
+            creation_time: None
+        })
+    }
+
+    let response = ListKeysResponse{keys: result};
+
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(response))
+}

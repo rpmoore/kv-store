@@ -2,7 +2,7 @@ mod namespace;
 
 use std::time::SystemTime;
 use prost_types::Timestamp;
-use common::storage::{CreateNamespaceRequest, DeleteKeyRequest, DeleteNamespaceRequest, GetRequest, GetResponse, ListKeysRequest, ListKeysResponse, MigrateToNewNodeRequest, PutRequest, PutResponse, storage_server::Storage, storage_server::StorageServer};
+use common::storage::{CreateNamespaceRequest, DeleteKeyRequest, DeleteNamespaceRequest, GetRequest, GetResponse, KeyMetadata, ListKeysRequest, ListKeysResponse, MigrateToNewNodeRequest, PutRequest, PutResponse, storage_server::Storage, storage_server::StorageServer};
 use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
 use tonic::{Code, Request, Response, Status, transport::Server};
@@ -12,6 +12,7 @@ use tracing_attributes::instrument;
 use uuid::Uuid;
 use namespace::{Namespace, PutValue};
 use crc32fast::Hasher;
+use crate::namespace::ListOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -149,9 +150,11 @@ impl Storage for NodeStorageServer {
                 Ok(Response::new(GetResponse{
                     key: request.get_ref().key.clone(),
                     value: value.value.to_vec(),
-                    version: value.version,
-                    crc: value.crc,
-                    creation_time: Some(Timestamp::from(SystemTime::now())),
+                    metadata: Some(common::storage::Metadata{
+                        version: value.version,
+                        crc: value.crc,
+                        creation_time: Some(Timestamp::from(SystemTime::now())),
+                    })
                 }))
             },
             Err(err) => {
@@ -162,7 +165,33 @@ impl Storage for NodeStorageServer {
     }
 
     async fn list_keys(&self, request: Request<ListKeysRequest>) -> Result<Response<ListKeysResponse>, Status> {
-        todo!()
+        let identity = request.extensions().get::<Identity>().unwrap();
+
+        let request = request.get_ref();
+
+        info!(uuid = identity.tenant_id().to_string(), "listing keys in namespace");
+
+        self.namespace.list_keys(ListOptions::default())
+            .map(|keys| Response::new(ListKeysResponse{
+                keys: keys.iter().map(|metadata| {
+
+                    let key_metadata = metadata.metadata.as_ref().unwrap();
+
+                    KeyMetadata {
+                        key: metadata.key.clone(),
+                        metadata: Some(common::storage::Metadata {
+                            version: key_metadata.version,
+                                crc: key_metadata.crc,
+                            creation_time: Some(Timestamp::from(SystemTime::now())),
+                        })
+                    }
+
+                } ).collect(),
+            }))
+            .map_err(|err| {
+                error!("failed to list keys");
+                Status::new(Code::Internal, "internal error")
+            })
     }
 
     async fn delete(&self, request: Request<DeleteKeyRequest>) -> Result<Response<()>, Status> {
@@ -170,6 +199,10 @@ impl Storage for NodeStorageServer {
     }
 
     async fn migrate_to_new_node(&self, request: Request<MigrateToNewNodeRequest>) -> Result<Response<()>, Status> {
+        todo!()
+    }
+
+    async fn get_metadata(&self, request: Request<GetRequest>) -> Result<Response<common::storage::Metadata>, Status> {
         todo!()
     }
 }

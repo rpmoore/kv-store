@@ -22,3 +22,6 @@ uuid = {workspace = true}
 sqlx = { version = "0.7.2", features = ["sqlite", "runtime-tokio"] }
 jsonwebtoken = {workspace = true}
 crc32fast = {workspace = true}
+git-version = {workspace = true}
+const_format = {workspace = true}
+
