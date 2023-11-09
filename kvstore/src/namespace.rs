@@ -1,6 +1,6 @@
 use serde::Serialize;
-use sqlx::{Pool, query, Row, Sqlite, Result};
 use sqlx::sqlite::SqliteRow;
+use sqlx::{query, Pool, Result, Row, Sqlite};
 use tracing::{error, info};
 use tracing_attributes::instrument;
 use uuid::Uuid;
@@ -15,7 +15,7 @@ impl From<SqliteRow> for Namespace {
     fn from(row: SqliteRow) -> Self {
         Namespace {
             name: row.get(0),
-            id: Uuid::parse_str(row.get(1)).unwrap()
+            id: Uuid::parse_str(row.get(1)).unwrap(),
         }
     }
 }
@@ -28,7 +28,7 @@ impl NamespaceRepo {
     pub fn new(db_pool: Pool<Sqlite>) -> NamespaceRepo {
         NamespaceRepo { db_pool }
     }
-    pub async fn exists(&self,  tenant: Uuid, namespace: &str) -> bool {
+    pub async fn exists(&self, tenant: Uuid, namespace: &str) -> bool {
         match query("select exists(select * from namespaces left join tenants on namespaces.tenant_id = tenants.id where tenants.uuid = ? and namespaces.name = ?)")
             .bind(tenant.to_string())
             .bind(&namespace)

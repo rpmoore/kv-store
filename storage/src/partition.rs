@@ -10,11 +10,45 @@ use std::sync::Arc;
 use tracing::error;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct Key(Arc<[u8]>);
+
+impl From<&[u8]> for Key {
+    fn from(bytes: &[u8]) -> Self {
+        Key(bytes.into())
+    }
+}
+
+impl From<Key> for Vec<u8> {
+    fn from(key: Key) -> Self {
+        key.0.to_vec()
+    }
+}
+
+impl From<&Vec<u8>> for Key {
+    fn from(bytes: &Vec<u8>) -> Self {
+        Key(bytes.as_slice().into())
+    }
+}
+
+impl From<Arc<[u8]>> for Key {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Key(bytes.clone())
+    }
+}
+
+impl AsRef<[u8]> for Key {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+#[derive(Clone)]
 pub struct Partition {
     db: Arc<DB>,
-    namespace_id: Uuid,
-    tenant_id: Uuid,
-    id: Uuid,
+    pub namespace_id: Uuid,
+    pub tenant_id: Uuid,
+    pub id: Uuid,
 }
 
 impl Debug for Partition {
@@ -107,7 +141,7 @@ impl Partition {
     }
 
     //todo need to return a different error type here
-    pub fn get(&self, key: &[u8]) -> Result<GetValue, ErrorKind> {
+    pub fn get(&self, key: &Key) -> Result<GetValue, ErrorKind> {
         let metadata_handle = self.db.cf_handle("metadata").unwrap();
         let default_handle = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
 
@@ -152,12 +186,12 @@ impl Partition {
         })
     }
 
-    pub fn put(&self, key: &[u8], value: &PutValue) -> Result<ValueMetadata, rocksdb::ErrorKind> {
+    pub fn put(&self, key: Key, value: &PutValue) -> Result<ValueMetadata, rocksdb::ErrorKind> {
         // todo get the metadata first to get the latest version and crc information, then update if no invariants are violated, like making sure the version we're going to put is larger than the current version
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
-        batch.put_cf(&cf_handle, key, value.metadata_as_bytes());
-        batch.put(key, value.value);
+        batch.put_cf(&cf_handle, &key, value.metadata_as_bytes());
+        batch.put(&key, value.value);
 
         self.db.write(batch).map_err(|err| {
             error! {err = err.to_string(), "failed to write value"};
@@ -170,20 +204,20 @@ impl Partition {
         })
     }
 
-    pub fn exists(&self, key: &[u8]) -> Result<bool, Error> {
-        self.db.get(key).map(|v| v.is_some())
+    pub fn exists(&self, key: Key) -> Result<bool, Error> {
+        self.db.get(&key).map(|v| v.is_some())
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
+    pub fn delete(&self, key: Key) -> Result<(), Error> {
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
-        batch.delete_cf(&cf_handle, key);
-        batch.delete(key);
+        batch.delete_cf(&cf_handle, &key);
+        batch.delete(&key);
 
         self.db.write(batch)
     }
 
-    pub fn list_keys(&self, opts: ListOptions) -> Result<Box<[KeyMetadata]>, Error> {
+    pub fn list_keys(&self, opts: ListOptions) -> Result<Arc<[KeyMetadata]>, Error> {
         let cf_handle = self.db.cf_handle("metadata").unwrap();
 
         let iter = match opts.start_at {
@@ -208,6 +242,6 @@ impl Partition {
             });
         }
 
-        Ok(results.into_boxed_slice())
+        Ok(results.as_slice().into())
     }
 }

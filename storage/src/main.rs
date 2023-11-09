@@ -1,10 +1,8 @@
+mod auth;
 mod lookup;
 mod partition;
-mod auth;
 
 use auth::AuthInterceptor;
-use partition::ListOptions;
-use lookup::PartitionLookup;
 use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
 use common::storage::{
@@ -13,12 +11,15 @@ use common::storage::{
     ListKeysRequest, ListKeysResponse, MigrateToNewNodeRequest, PutRequest, PutResponse,
 };
 use crc32fast::Hasher;
-use partition::{Partition, PutValue};
+use lookup::PartitionLookup;
+use partition::ListOptions;
+use partition::{Key, Partition, PutValue};
 use prost_types::Timestamp;
+use rayon::prelude::*;
 use std::time::SystemTime;
 use tonic::service::Interceptor;
 use tonic::{transport::Server, Code, Request, Response, Status};
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn, warn_span, Level};
 use tracing_attributes::instrument;
 use uuid::Uuid;
 
@@ -41,9 +42,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let interceptor = AuthInterceptor::new(validator);
 
     // replace with a real namespace in the future that belongs to a specific tenant
-    let namespace = Partition::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "namespaces")?;
+    let partition = Partition::new(
+        Uuid::new_v4(),
+        Uuid::parse_str("9cafb784-ae2f-49a2-800e-e7fafeffabad").unwrap(),
+        Uuid::parse_str("afd98cbf-040e-4a4c-b398-26bbc1d492d5").unwrap(),
+        "namespaces",
+    )?;
 
-    let server = NodeStorageServer::new(namespace);
+    let server = NodeStorageServer::new(partition);
 
     Server::builder()
         .add_service(StorageServer::with_interceptor(server, interceptor))
@@ -55,13 +61,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Debug)]
 struct NodeStorageServer {
     partition_lookup: PartitionLookup,
-    namespace: Partition,
 }
 
 impl NodeStorageServer {
-    fn new(namespace: Partition) -> NodeStorageServer {
-        NodeStorageServer { namespace, partition_lookup: PartitionLookup::default()}
+    fn new(partition: Partition) -> NodeStorageServer {
+        let lookup = PartitionLookup::new();
+        lookup.add_partition(partition);
 
+        NodeStorageServer {
+            partition_lookup: lookup,
+        }
     }
 }
 
@@ -118,11 +127,15 @@ impl Storage for NodeStorageServer {
             }
         };
 
-        let partition = self.partition_lookup.get_partition_for_key(identity.tenant_id(), namespace_id, request.key.as_slice())
+        let key: Key = (&request.key).into();
+
+        let partition = self
+            .partition_lookup
+            .get_partition_for_key(identity.tenant_id(), namespace_id, &key)
             .ok_or(Status::new(Code::NotFound, "partition not found"))?;
 
         match partition.put(
-            request.key.as_slice(),
+            key,
             &PutValue {
                 crc: calculated_crc,
                 version: 1, // todo calculate the version given the current version
@@ -144,16 +157,31 @@ impl Storage for NodeStorageServer {
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let identity = request.extensions().get::<Identity>().unwrap();
 
+        let request = request.get_ref();
+
         info!(
             uuid = identity.tenant_id().to_string(),
             "got request to get data"
         );
 
+        let namespace_id = match Uuid::parse_str(&request.namespace_id) {
+            Ok(id) => id,
+            Err(err) => {
+                error!(err = err.to_string(), "failed to parse uuid");
+                return Err(Status::new(Code::InvalidArgument, "invalid uuid"));
+            }
+        };
 
+        let key: Key = (&request.key).into();
 
-        match self.namespace.get(request.get_ref().key.as_slice()) {
+        let partition = self
+            .partition_lookup
+            .get_partition_for_key(identity.tenant_id(), namespace_id, &key)
+            .ok_or(Status::new(Code::NotFound, "partition not found"))?;
+
+        match partition.get(&key).into() {
             Ok(value) => Ok(Response::new(GetResponse {
-                key: request.get_ref().key.clone(),
+                key: key.into(),
                 value: value.value.to_vec(),
                 metadata: Some(common::storage::Metadata {
                     version: value.version,
@@ -175,6 +203,7 @@ impl Storage for NodeStorageServer {
         todo!()
     }
 
+    #[instrument(skip(self, request) fields(namespace_id = %request.get_ref().namespace_id))]
     async fn list_keys(
         &self,
         request: Request<ListKeysRequest>,
@@ -188,31 +217,32 @@ impl Storage for NodeStorageServer {
             "listing keys in namespace"
         );
 
-        self.namespace
-            .list_keys(ListOptions::default())
-            .map(|keys| {
-                Response::new(ListKeysResponse {
-                    keys: keys
-                        .iter()
-                        .map(|metadata| {
-                            let key_metadata = metadata.metadata.as_ref().unwrap();
+        let Some(partitions) = self.partition_lookup.partitions(
+            identity.tenant_id(),
+            Uuid::parse_str(&request.namespace_id).unwrap(),
+        ) else {
+            return Ok(Response::new(ListKeysResponse::default())); // if there are no partitions return an empty list
+        };
+        let mut keys = Vec::new();
+        // todo see if we can use rayon here, I ran into some issues with not being able to map the data in inner iterator and then return that back
+        for result_set in partitions
+            .iter()
+            .flat_map(|partition: &Partition| partition.list_keys(ListOptions::default()))
+        {
+            for metadata in result_set.as_ref() {
+                let key_metadata = metadata.metadata.as_ref().unwrap();
+                keys.push(KeyMetadata {
+                    key: metadata.key.clone(),
+                    metadata: Some(common::storage::Metadata {
+                        version: key_metadata.version,
+                        crc: key_metadata.crc,
+                        creation_time: Some(Timestamp::from(SystemTime::now())),
+                    }),
+                });
+            }
+        }
 
-                            KeyMetadata {
-                                key: metadata.key.clone(),
-                                metadata: Some(common::storage::Metadata {
-                                    version: key_metadata.version,
-                                    crc: key_metadata.crc,
-                                    creation_time: Some(Timestamp::from(SystemTime::now())),
-                                }),
-                            }
-                        })
-                        .collect(),
-                })
-            })
-            .map_err(|err| {
-                error!("failed to list keys");
-                Status::new(Code::Internal, "internal error")
-            })
+        Ok(Response::new(ListKeysResponse { keys }))
     }
 
     async fn delete(&self, request: Request<DeleteKeyRequest>) -> Result<Response<()>, Status> {

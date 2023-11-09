@@ -1,5 +1,5 @@
-use sqlx::{Pool, query, Result, Row, Sqlite};
 use sqlx::sqlite::SqliteRow;
+use sqlx::{query, Pool, Result, Row, Sqlite};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -13,7 +13,6 @@ pub struct TenantRepo {
 }
 
 impl TenantRepo {
-
     pub fn new(db_pool: Pool<Sqlite>) -> TenantRepo {
         TenantRepo { db_pool }
     }
@@ -24,6 +23,7 @@ impl TenantRepo {
                 name: Box::from(row.get::<String, usize>(0)),
                 uuid: Uuid::parse_str(row.get(1)).unwrap(),
             })
-            .fetch_one(&self.db_pool).await
+            .fetch_one(&self.db_pool)
+            .await
     }
 }

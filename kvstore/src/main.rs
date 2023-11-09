@@ -12,10 +12,12 @@ use crc32fast::Hasher;
 use derive_more::{Display, Error};
 use futures::{try_join, TryStreamExt};
 use git_version::git_version;
+use namespace::{Namespace, NamespaceRepo};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{Sqlite, SqlitePoolOptions, SqliteRow};
 use sqlx::{migrate::MigrateDatabase, query, Pool, Row};
 use std::io::{Error, ErrorKind};
+use tenant::TenantRepo;
 use tonic::transport::Channel;
 use tonic::Extensions;
 use tracing::{error, info, Level};
@@ -23,8 +25,6 @@ use tracing_actix_web::TracingLogger;
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::FormatFields;
 use uuid::Uuid;
-use namespace::{NamespaceRepo, Namespace};
-use tenant::TenantRepo;
 
 mod auth;
 mod connections;
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Error> {
         namespaces: NamespaceRepo::new(pool.clone()),
         jwts,
         connection_manager,
-        tenants: TenantRepo::new(pool.clone())
+        tenants: TenantRepo::new(pool.clone()),
     });
 
     let healthcheck = common::healthcheck::healthcheck_endpoint(8081, || Ok("healthy".to_string()));
@@ -142,7 +142,7 @@ struct AppData {
     connection_manager: ConnectionManager,
     jwts: auth::JwtIssuerVerifier,
     namespaces: NamespaceRepo,
-    tenants: TenantRepo
+    tenants: TenantRepo,
 }
 
 #[derive(Deserialize, Debug)]
@@ -282,7 +282,6 @@ async fn get(
     }
 }
 
-
 #[instrument(skip(app_data, auth_data, path))]
 #[put("/namespaces/{namespace}/keys/{id}")]
 async fn put(
@@ -370,7 +369,6 @@ async fn create_namespace(
     Ok(HttpResponseBuilder::new(StatusCode::NOT_IMPLEMENTED).finish())
 }
 
-
 #[derive(Serialize, Debug)]
 struct NamespacesResponse {
     namespaces: Vec<Namespace>,
@@ -394,12 +392,12 @@ async fn list_namespaces(
     let namespaces = match app_data.namespaces.list(tenant_id).await {
         Ok(namespaces) => namespaces,
         Err(err) => {
-        error!(err = err.to_string());
-        return Ok(HttpResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR).finish())
+            error!(err = err.to_string());
+            return Ok(HttpResponseBuilder::new(StatusCode::INTERNAL_SERVER_ERROR).finish());
         }
     };
 
-    Ok(HttpResponseBuilder::new(StatusCode::OK).json(NamespacesResponse{ namespaces}))
+    Ok(HttpResponseBuilder::new(StatusCode::OK).json(NamespacesResponse { namespaces }))
 }
 
 #[derive(Serialize, Debug)]
@@ -432,6 +430,14 @@ async fn list_keys(
 
     info!(tenant_id = tenant_id.to_string(), "fetching keys");
 
+    let namespace = match app_data.namespaces.get(tenant_id, &namespace).await {
+        Ok(namespace) => namespace,
+        Err(err) => {
+            error!(err = err.to_string(), "failed to get namespace");
+            return Ok(HttpResponseBuilder::new(StatusCode::NOT_FOUND).finish());
+        }
+    };
+
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
     let metadata = auth_data.into_inner().into();
@@ -440,7 +446,7 @@ async fn list_keys(
         metadata,
         Extensions::default(),
         common::storage::ListKeysRequest {
-            namespace_id: namespace,
+            namespace_id: namespace.id.to_string(),
             limit: None,
             start_key: None,
         },

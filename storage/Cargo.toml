@@ -19,3 +19,5 @@ uuid = {workspace = true}
 serde = {workspace = true}
 crc32fast = {workspace = true}
 dashmap = {workspace = true}
+jumphash = {workspace = true}
+rayon = {workspace = true}

@@ -1,7 +1,7 @@
-use tonic::{Code, Request, Status};
-use tonic::service::Interceptor;
-use tracing::{error, info};
 use common::auth::{JwtValidator, RsaJwtValidator};
+use tonic::service::Interceptor;
+use tonic::{Code, Request, Status};
+use tracing::{error, info};
 
 #[derive(Debug, Clone)]
 pub struct AuthInterceptor {
