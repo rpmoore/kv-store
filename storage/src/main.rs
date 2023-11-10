@@ -2,6 +2,8 @@ mod auth;
 mod lookup;
 mod partition;
 
+use std::error::Error;
+use std::path::Path;
 use auth::AuthInterceptor;
 use common::auth::{Identity, JwtValidator, RsaJwtValidator};
 use common::read_file_bytes;
@@ -43,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let interceptor = AuthInterceptor::new(validator);
 
+    /*
     // replace with a real namespace in the future that belongs to a specific tenant
     let partition = Partition::new(
         Uuid::parse_str("17f8457b-bf2b-4788-9cbc-2043a5fbad14").unwrap(),
@@ -57,8 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Uuid::parse_str("afd98cbf-040e-4a4c-b398-26bbc1d492d5").unwrap(),
         "namespaces",
     )?;
+     */
 
-    let server = NodeStorageServer::new(vec!(partition, partition2));
+    let server = NodeStorageServer::new(Path::new("namespaces"))?;
+    //server.partition_lookup.add_partition(partition)?;
+    //server.partition_lookup.add_partition(partition2)?;
 
     Server::builder()
         .add_service(StorageServer::with_interceptor(server, interceptor))
@@ -73,15 +79,9 @@ struct NodeStorageServer {
 }
 
 impl NodeStorageServer {
-    fn new(partitions: Vec<Partition>) -> NodeStorageServer {
-        let lookup = PartitionLookup::new();
-        for partition in partitions {
-            lookup.add_partition(partition);
-        }
-
-        NodeStorageServer {
-            partition_lookup: lookup,
-        }
+    fn new(config: impl AsRef<Path>) -> Result<NodeStorageServer, Box<dyn Error>> {
+        let partition_lookup = PartitionLookup::load(config)?; // should move this out
+        Ok(NodeStorageServer { partition_lookup })
     }
 }
 

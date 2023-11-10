@@ -120,6 +120,7 @@ impl Partition {
     where
         I: AsRef<Path>,
     {
+        info!(partition_id = id.to_string(), namespace_id = namespace_id.to_string(), tenant_id = tenant_id.to_string(), "initializing partition");
         let mut options = Options::default();
         options.create_if_missing(true);
         options.set_use_direct_io_for_flush_and_compaction(true);

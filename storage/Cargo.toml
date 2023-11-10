@@ -22,3 +22,4 @@ dashmap = {workspace = true}
 jumphash = {workspace = true}
 rayon = {workspace = true}
 futures = {workspace = true}
+serde_json = {workspace = true}
