@@ -22,6 +22,8 @@ use tonic::{transport::Server, Code, Request, Response, Status};
 use tracing::{error, info, warn, warn_span, Level};
 use tracing_attributes::instrument;
 use uuid::Uuid;
+use futures::future::join_all;
+use futures::{FutureExt, TryFutureExt};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,13 +45,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // replace with a real namespace in the future that belongs to a specific tenant
     let partition = Partition::new(
-        Uuid::new_v4(),
+        Uuid::parse_str("17f8457b-bf2b-4788-9cbc-2043a5fbad14").unwrap(),
         Uuid::parse_str("9cafb784-ae2f-49a2-800e-e7fafeffabad").unwrap(),
         Uuid::parse_str("afd98cbf-040e-4a4c-b398-26bbc1d492d5").unwrap(),
         "namespaces",
     )?;
 
-    let server = NodeStorageServer::new(partition);
+    let partition2 = Partition::new(
+        Uuid::parse_str("3921ca4a-2bd5-479d-9dea-2fe1f6835a2c").unwrap(),
+        Uuid::parse_str("9cafb784-ae2f-49a2-800e-e7fafeffabad").unwrap(),
+        Uuid::parse_str("afd98cbf-040e-4a4c-b398-26bbc1d492d5").unwrap(),
+        "namespaces",
+    )?;
+
+    let server = NodeStorageServer::new(vec!(partition, partition2));
 
     Server::builder()
         .add_service(StorageServer::with_interceptor(server, interceptor))
@@ -64,9 +73,11 @@ struct NodeStorageServer {
 }
 
 impl NodeStorageServer {
-    fn new(partition: Partition) -> NodeStorageServer {
+    fn new(partitions: Vec<Partition>) -> NodeStorageServer {
         let lookup = PartitionLookup::new();
-        lookup.add_partition(partition);
+        for partition in partitions {
+            lookup.add_partition(partition);
+        }
 
         NodeStorageServer {
             partition_lookup: lookup,
@@ -223,12 +234,11 @@ impl Storage for NodeStorageServer {
         ) else {
             return Ok(Response::new(ListKeysResponse::default())); // if there are no partitions return an empty list
         };
-        let mut keys = Vec::new();
         // todo see if we can use rayon here, I ran into some issues with not being able to map the data in inner iterator and then return that back
-        for result_set in partitions
-            .iter()
-            .flat_map(|partition: &Partition| partition.list_keys(ListOptions::default()))
-        {
+
+        let futures = partitions.iter().map(|partition| async move {
+            let result_set = partition.list_keys(ListOptions::default())?;
+            let mut keys = Vec::new();
             for metadata in result_set.as_ref() {
                 let key_metadata = metadata.metadata.as_ref().unwrap();
                 keys.push(KeyMetadata {
@@ -239,6 +249,20 @@ impl Storage for NodeStorageServer {
                         creation_time: Some(Timestamp::from(SystemTime::now())),
                     }),
                 });
+            }
+
+            Ok::<Vec<KeyMetadata>, rocksdb::Error>(keys)
+        });
+
+        let mut keys = Vec::new();
+
+        for result_set in join_all(futures).await.iter() {
+            match result_set {
+                Ok(result_set) => keys.extend_from_slice(result_set.as_slice()),
+                Err(err) => {
+                    error!(err = format!("err: {}", err), "failed to list keys");
+                    return Err(Status::new(Code::Internal, "internal error"));
+                }
             }
         }
 

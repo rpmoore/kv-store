@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
+use tracing_attributes::instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -125,9 +126,11 @@ impl Partition {
         options.set_use_direct_reads(true);
         options.create_missing_column_families(true);
 
+        let path = path.as_ref().join(id.to_string());
+
         let db = DB::open_cf(
             &options,
-            &path,
+            path.as_path(),
             vec![DEFAULT_COLUMN_FAMILY_NAME, "metadata"],
         )?;
 
@@ -217,7 +220,9 @@ impl Partition {
         self.db.write(batch)
     }
 
+    #[instrument(skip(self, opts), fields(namespace_id = %self.namespace_id, tenant_id = %self.tenant_id, partition_id = %self.id))]
     pub fn list_keys(&self, opts: ListOptions) -> Result<Arc<[KeyMetadata]>, Error> {
+        info!("listing keys");
         let cf_handle = self.db.cf_handle("metadata").unwrap();
 
         let iter = match opts.start_at {
@@ -241,6 +246,8 @@ impl Partition {
                 }),
             });
         }
+
+        info!(result_size = results.len(), "finished listing keys");
 
         Ok(results.as_slice().into())
     }
