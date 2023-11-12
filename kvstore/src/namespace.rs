@@ -1,3 +1,4 @@
+use derive_more::Display;
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{query, Pool, Result, Row, Sqlite};
@@ -9,6 +10,12 @@ use uuid::Uuid;
 pub struct Namespace {
     pub name: String,
     pub id: Uuid,
+}
+
+impl std::fmt::Display for Namespace {
+fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{ name: {}, id: {} }}", self.name, self.id)
+    }
 }
 
 impl From<SqliteRow> for Namespace {

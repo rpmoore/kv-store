@@ -1,7 +1,7 @@
 use common::storage::KeyMetadata;
 use common::storage::Metadata;
 use rocksdb::{
-    Error, ErrorKind, IteratorMode, Options, WriteBatch, DB, DEFAULT_COLUMN_FAMILY_NAME,
+    IteratorMode, Options, WriteBatch, DB, DEFAULT_COLUMN_FAMILY_NAME,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
@@ -10,6 +10,45 @@ use std::sync::Arc;
 use tracing::{error, info};
 use tracing_attributes::instrument;
 use uuid::Uuid;
+use std::fmt::Display;
+use crate::partition::Error::RocksDBError;
+use std::error::Error as StdError;
+
+#[derive(Debug, Clone)]
+pub enum Error {
+    RocksDBError(rocksdb::Error),
+    General(String)
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RocksDBError(err) => f.write_str(err.to_string().as_str()),
+            Error::General(err) => f.write_str(err.as_str())
+        }
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            RocksDBError(err) => Some(err),
+            Error::General(_) => None
+        }
+    }
+}
+
+impl From<rocksdb::Error> for Error {
+    fn from(value: rocksdb::Error) -> Self {
+        RocksDBError(value)
+    }
+}
+
+impl From<&rocksdb::Error> for Error {
+    fn from(value: &rocksdb::Error) -> Self {
+        RocksDBError(value.clone())
+    }
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Key(Arc<[u8]>);
@@ -144,8 +183,8 @@ impl Partition {
         })
     }
 
-    //todo need to return a different error type here
-    pub fn get(&self, key: &Key) -> Result<GetValue, ErrorKind> {
+    #[instrument(skip(self, key) fields(namespace_id = %self.namespace_id, tenant_id = %self.tenant_id, partition_id = %self.id))]
+    pub fn get(&self, key: &Key) -> Result<GetValue, Error> {
         let metadata_handle = self.db.cf_handle("metadata").unwrap();
         let default_handle = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
 
@@ -157,13 +196,11 @@ impl Partition {
             Some(Ok(Some(value))) => value.clone().into_boxed_slice(),
 
             Some(Err(err)) => {
-                return {
-                    error!(err = err.to_string(), "failed to get value");
-                    return Err(err.kind());
-                }
+                error!({info = err.to_string()}, "failed to get value: {}", err);
+                return Err(err.into());
             }
 
-            _ => return Err(ErrorKind::Incomplete),
+            _ => return Err(Error::General("could not find value".to_string())),
         };
 
         let (crc, version) = match get_parts.get(1) {
@@ -175,12 +212,10 @@ impl Partition {
                 )
             }
             Some(Err(err)) => {
-                return {
-                    error!(err = err.to_string(), "failed to get value");
-                    return Err(err.kind());
-                }
+                error!({info = err.to_string()}, "failed to get value: {}", err);
+                return Err(err.into());
             }
-            _ => return Err(ErrorKind::Incomplete),
+            _ => return Err(Error::General("could not find value".to_string())),
         };
 
         Ok(GetValue {
@@ -209,7 +244,7 @@ impl Partition {
     }
 
     pub fn exists(&self, key: Key) -> Result<bool, Error> {
-        self.db.get(&key).map(|v| v.is_some())
+        Ok(self.db.get(&key).map(|v| v.is_some())?)
     }
 
     pub fn delete(&self, key: Key) -> Result<(), Error> {
@@ -218,7 +253,7 @@ impl Partition {
         batch.delete_cf(&cf_handle, &key);
         batch.delete(&key);
 
-        self.db.write(batch)
+        self.db.write(batch).map_err(|err| Error::RocksDBError(err))
     }
 
     #[instrument(skip(self, opts), fields(namespace_id = %self.namespace_id, tenant_id = %self.tenant_id, partition_id = %self.id))]

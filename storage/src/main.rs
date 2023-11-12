@@ -15,27 +15,39 @@ use common::storage::{
 use crc32fast::Hasher;
 use lookup::PartitionLookup;
 use partition::ListOptions;
-use partition::{Key, Partition, PutValue};
+use partition::{Key, PutValue, Error as PError};
 use prost_types::Timestamp;
 use rayon::prelude::*;
 use std::time::SystemTime;
 use tonic::service::Interceptor;
 use tonic::{transport::Server, Code, Request, Response, Status};
-use tracing::{error, info, warn, warn_span, Level};
+use tracing::{error, info, warn, Level};
 use tracing_attributes::instrument;
 use uuid::Uuid;
 use futures::future::join_all;
 use futures::{FutureExt, TryFutureExt};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
     tracing_subscriber::fmt()
-        .json()
         .with_max_level(Level::INFO)
         .with_target(true)
+        .with_span_events(FmtSpan::CLOSE)
         .with_thread_names(true)
         .with_file(true)
         .init();
+        } else {
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(Level::INFO)
+            .with_target(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_thread_names(true)
+            .with_file(true)
+            .init();
+    }
 
     let addr = "[::1]:50051".parse()?;
 
@@ -165,6 +177,7 @@ impl Storage for NodeStorageServer {
         }
     }
 
+    #[instrument(skip(self, request) fields(namespace_id = %request.get_ref().namespace_id))]
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let identity = request.extensions().get::<Identity>().unwrap();
 
@@ -201,7 +214,7 @@ impl Storage for NodeStorageServer {
                 }),
             })),
             Err(err) => {
-                error!("failed to get value");
+                error!(err = err.to_string(), "failed to get value");
                 Err(Status::new(Code::NotFound, "not found"))
             }
         }
@@ -251,7 +264,7 @@ impl Storage for NodeStorageServer {
                 });
             }
 
-            Ok::<Vec<KeyMetadata>, rocksdb::Error>(keys)
+            Ok::<Vec<KeyMetadata>, PError>(keys)
         });
 
         let mut keys = Vec::new();

@@ -20,9 +20,10 @@ use std::io::{Error, ErrorKind};
 use tenant::TenantRepo;
 use tonic::transport::Channel;
 use tonic::Extensions;
-use tracing::{error, info, Level};
+use tracing::{error, info, Instrument, Level, span};
 use tracing_actix_web::TracingLogger;
 use tracing_attributes::instrument;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::FormatFields;
 use uuid::Uuid;
 
@@ -38,13 +39,24 @@ const USER_AGENT: &str = formatcp!("kvstore/{} - {}", VERSION, GIT_VERSION);
 
 #[actix_web::main]
 async fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(Level::INFO)
-        .with_target(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .init();
+    if cfg!(debug_assertions) {
+        tracing_subscriber::fmt()
+            .with_max_level(Level::INFO)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_target(true)
+            .with_thread_names(true)
+            .with_file(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .json()
+            .with_max_level(Level::INFO)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_target(true)
+            .with_thread_names(true)
+            .with_file(true)
+            .init();
+    }
 
     let private_key = common::read_file_bytes("key.pem")?;
     let public_key = common::read_file_bytes("key.pub")?;
@@ -451,8 +463,8 @@ async fn list_keys(
             start_key: None,
         },
     );
-
-    let response = match client.list_keys(request).await {
+    let key_span = span!(Level::INFO, "listing keys");
+    let response = match client.list_keys(request).instrument(key_span).await {
         Ok(response) => response.into_inner(),
         Err(err) => {
             error!(err = err.to_string(), "failed to list keys");

@@ -3,14 +3,16 @@ use std::error::Error;
 use std::fmt::Formatter;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use crate::partition::{Key, Partition};
+use crate::partition::{Key, Partition, Error as PError};
 use dashmap::DashMap;
-use jumphash::JumpHasher;
+use jumphash::{CustomJumpHasher, JumpHasher};
+use tracing::instrument;
 use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Visitor;
 use tracing::info;
 use uuid::Uuid;
+use common::crc64hasher::Crc64Hasher;
 
 const PARTITION_CONFIG: &str = "partitions.json";
 
@@ -18,6 +20,7 @@ const PARTITION_CONFIG: &str = "partitions.json";
 pub struct PartitionLookup {
     partitions: DashMap<(Uuid, Uuid), Arc<[Partition]>>,
     config_dir: String,
+    hasher: CustomJumpHasher<Crc64Hasher>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,24 +93,25 @@ struct PersistedPartition {
 }
 
 impl PersistedState {
-    fn to_partition_lookup(&self, config_dir: impl AsRef<Path>) -> Result<PartitionLookup, rocksdb::Error> {
+    fn to_partition_lookup(&self, config_dir: impl AsRef<Path>) -> Result<PartitionLookup, PError> {
         let config_dir = config_dir.as_ref();
         let mut partitions: DashMap<(Uuid, Uuid), Arc<[Partition]>> = DashMap::new();
         for (key, value) in self.partitions.iter() {
-            let value: Vec<Partition> = value.iter().map(|partition| partition.to_partition(config_dir)).collect::<Result<Vec<Partition>, rocksdb::Error>>()?;
+            let value: Vec<Partition> = value.iter().map(|partition| partition.to_partition(config_dir)).collect::<Result<Vec<Partition>, PError>>()?;
 
             partitions.insert(key.into(), value.into());
         }
 
         Ok(PartitionLookup {
             partitions,
+            hasher: CustomJumpHasher::new(Crc64Hasher::new()),
             config_dir: config_dir.to_str().unwrap().to_string(),
         })
     }
 }
 
 impl PersistedPartition {
-    fn to_partition(&self, base_path: impl AsRef<Path>) -> Result<Partition, rocksdb::Error> {
+    fn to_partition(&self, base_path: impl AsRef<Path>) -> Result<Partition, PError> {
         Partition::new(
             self.id,
             self.namespace_id,
@@ -156,6 +160,7 @@ impl PartitionLookup {
             return Ok(PartitionLookup{
                 partitions: DashMap::new(),
                 config_dir: config.to_str().unwrap().to_string(),
+                hasher: CustomJumpHasher::new(Crc64Hasher::new()),
             })
         }
 
@@ -184,6 +189,7 @@ impl PartitionLookup {
     }
 
     // Returns the partition that the key routes to using the consistent jump algorithm
+    #[instrument(skip(self, key))]
     pub fn get_partition_for_key(
         &self,
         tenant_id: Uuid,
@@ -192,7 +198,8 @@ impl PartitionLookup {
     ) -> Option<Partition> {
         self.partitions(tenant_id, namespace_id).map(|partitions| {
             let partition_count = partitions.len();
-            let partition_index = JumpHasher::new().slot(key, partition_count as u32);
+            let partition_index = self.hasher.slot(key, partition_count as u32);
+            info!(partitions = partition_count, partition_index = partition_index, "routing key to partition");
             partitions[partition_index as usize].clone()
         })
     }
