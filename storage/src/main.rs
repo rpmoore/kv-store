@@ -203,10 +203,10 @@ impl Storage for NodeStorageServer {
             .get_partition_for_key(identity.tenant_id(), namespace_id, &key)
             .ok_or(Status::new(Code::NotFound, "partition not found"))?;
 
-        match partition.get(&key).into() {
+        match partition.get(&key) {
             Ok(value) => Ok(Response::new(GetResponse {
                 key: key.into(),
-                value: value.value.to_vec(),
+                value: value.value,
                 metadata: Some(common::storage::Metadata {
                     version: value.version,
                     crc: value.crc,

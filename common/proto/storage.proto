@@ -8,9 +8,10 @@ import "google/protobuf/empty.proto";
 
 message PutRequest {
   string namespace_id = 1;
-  bytes key = 2;
-  bytes value = 3;
-  optional uint32 crc = 4;
+  string partition_id = 2;
+  bytes key = 3;
+  bytes value = 4;
+  optional uint32 crc = 5;
 }
 
 message PutResponse {
@@ -21,8 +22,9 @@ message PutResponse {
 
 message GetRequest {
   string namespace_id = 1;
-  bytes key = 2;
-  optional uint32 version = 3;
+  string partition_id = 2;
+  bytes key = 3;
+  optional uint32 version = 4;
 }
 
 message Metadata {
