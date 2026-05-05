@@ -9,7 +9,7 @@ edition = "2021"
 common = {path = "../common"}
 prost = {workspace = true}
 prost-types = {workspace = true}
-rocksdb = {version = "0.21.0", features = ["multi-threaded-cf"]}
+rocksdb = {version = "0.22.0", features = ["multi-threaded-cf"]}
 tonic = {workspace = true}
 tokio = {workspace = true, features = ["macros", "rt-multi-thread"]}
 tracing = {workspace = true}
