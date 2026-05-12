@@ -24,7 +24,6 @@ use tracing::{error, info, Instrument, Level, span};
 use tracing_actix_web::TracingLogger;
 use tracing_attributes::instrument;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::FormatFields;
 use uuid::Uuid;
 
 mod auth;
@@ -185,10 +184,10 @@ impl Responder for PutResp {
 
 #[derive(Error, Display, Debug)]
 enum KVErrors {
-    #[display(fmt = "downstream service unavailable")]
+    #[display("downstream service unavailable")]
     ServiceUnavailable,
 
-    #[display(fmt = "internal server error")]
+    #[display("internal server error")]
     InternalServerError,
 }
 
@@ -266,6 +265,8 @@ async fn get(
 
     let mut client = app_data.connection_manager.get_conn(0).unwrap().clone(); // this clone is needed because the client needs a mutable reference, the tonic docs claim this is a cheap clone
 
+    // need to remember how I was going to figure out the partition in the client code
+
     let request = tonic::Request::from_parts(
         metadata,
         Extensions::default(),
@@ -336,6 +337,7 @@ async fn put(
         }
         None => {}
     }
+
 
     let request = tonic::Request::from_parts(
         metadata,

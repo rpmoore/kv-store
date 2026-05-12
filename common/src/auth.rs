@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha384};
 use std::collections::HashSet;
 use std::fmt;
-use std::fmt::{Debug, Display, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use tonic::metadata::{MetadataMap, MetadataValue};
 use tracing::{error, instrument};
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     sub: Uuid,
     company: String,
@@ -60,6 +60,7 @@ impl Debug for Token {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Identity {
     token: Token,
     claims: Claims,

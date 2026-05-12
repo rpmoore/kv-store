@@ -10,45 +10,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 use tracing_attributes::instrument;
 use uuid::Uuid;
-use std::fmt::Display;
-use crate::partition::Error::RocksDBError;
-use std::error::Error as StdError;
-
-#[derive(Debug, Clone)]
-pub enum Error {
-    RocksDBError(rocksdb::Error),
-    General(String)
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RocksDBError(err) => f.write_str(err.to_string().as_str()),
-            Error::General(err) => f.write_str(err.as_str())
-        }
-    }
-}
-
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            RocksDBError(err) => Some(err),
-            Error::General(_) => None
-        }
-    }
-}
-
-impl From<rocksdb::Error> for Error {
-    fn from(value: rocksdb::Error) -> Self {
-        RocksDBError(value)
-    }
-}
-
-impl From<&rocksdb::Error> for Error {
-    fn from(value: &rocksdb::Error) -> Self {
-        RocksDBError(value.clone())
-    }
-}
+use common::BoxError;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Key(Arc<[u8]>);
@@ -155,7 +117,7 @@ impl Partition {
         namespace_id: Uuid,
         tenant_id: Uuid,
         path: I,
-    ) -> Result<Partition, Error>
+    ) -> Result<Partition, BoxError>
     where
         I: AsRef<Path>,
     {
@@ -184,7 +146,7 @@ impl Partition {
     }
 
     #[instrument(skip(self, key) fields(namespace_id = %self.namespace_id, tenant_id = %self.tenant_id, partition_id = %self.id))]
-    pub fn get(&self, key: &Key) -> Result<GetValue, Error> {
+    pub fn get(&self, key: &Key) -> Result<GetValue, BoxError> {
         let metadata_handle = self.db.cf_handle("metadata").unwrap();
         let default_handle = self.db.cf_handle(DEFAULT_COLUMN_FAMILY_NAME).unwrap();
 
@@ -196,15 +158,15 @@ impl Partition {
             Ok(Some(value)) => {
                 let (crc, version) = value.split_at(4);
                 (
-                    u32::from_be_bytes(crc.try_into().unwrap()),
-                    u32::from_be_bytes(version.try_into().unwrap()),
+                    u32::from_be_bytes(crc.try_into()?),
+                    u32::from_be_bytes(version.try_into()?),
                 )
             }
             Err(err) => {
                 error!({info = err.to_string()}, "failed to get value: {}", err);
                 return Err(err.into());
             }
-            _ => return Err(Error::General("could not find value".to_string())),
+            _ => return Err(String::from("value not found").into()),
          };
 
 
@@ -216,7 +178,7 @@ impl Partition {
                 return Err(err.into());
             }
 
-            _ => return Err(Error::General("could not find value".to_string())),
+            _ => return Err(String::from("could not find value").into()),
         };
 
         Ok(GetValue {
@@ -226,7 +188,7 @@ impl Partition {
         })
     }
 
-    pub fn put(&self, key: Key, value: &PutValue) -> Result<ValueMetadata, rocksdb::ErrorKind> {
+    pub fn put(&self, key: Key, value: &PutValue) -> Result<ValueMetadata, BoxError> {
         // todo get the metadata first to get the latest version and crc information, then update if no invariants are violated, like making sure the version we're going to put is larger than the current version
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
@@ -235,7 +197,7 @@ impl Partition {
 
         self.db.write(batch).map_err(|err| {
             error! {err = err.to_string(), "failed to write value"};
-            err.kind()
+            err
         })?;
 
         Ok(ValueMetadata {
@@ -244,21 +206,21 @@ impl Partition {
         })
     }
 
-    pub fn exists(&self, key: Key) -> Result<bool, Error> {
+    pub fn exists(&self, key: Key) -> Result<bool, BoxError> {
         Ok(self.db.get(&key).map(|v| v.is_some())?)
     }
 
-    pub fn delete(&self, key: Key) -> Result<(), Error> {
+    pub fn delete(&self, key: Key) -> Result<(), BoxError> {
         let cf_handle = self.db.cf_handle("metadata").unwrap();
         let mut batch = WriteBatch::default();
         batch.delete_cf(&cf_handle, &key);
         batch.delete(&key);
 
-        self.db.write(batch).map_err(|err| Error::RocksDBError(err))
+        self.db.write(batch).map_err(|err| err.into())
     }
 
     #[instrument(skip(self, opts), fields(namespace_id = %self.namespace_id, tenant_id = %self.tenant_id, partition_id = %self.id))]
-    pub fn list_keys(&self, opts: ListOptions) -> Result<Arc<[KeyMetadata]>, Error> {
+    pub fn list_keys(&self, opts: ListOptions) -> Result<Arc<[KeyMetadata]>, BoxError> {
         info!("listing keys");
         let cf_handle = self.db.cf_handle("metadata").unwrap();
 

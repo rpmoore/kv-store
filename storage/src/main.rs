@@ -1,3 +1,5 @@
+extern crate core;
+
 mod auth;
 mod lookup;
 mod partition;
@@ -5,8 +7,8 @@ mod partition;
 use std::error::Error;
 use std::path::Path;
 use auth::AuthInterceptor;
-use common::auth::{Identity, JwtValidator, RsaJwtValidator};
-use common::read_file_bytes;
+use common::auth::{Identity, RsaJwtValidator};
+use common::{read_file_bytes, BoxError};
 use common::storage::{
     storage_server::Storage, storage_server::StorageServer, CreateNamespaceRequest,
     DeleteKeyRequest, DeleteNamespaceRequest, GetRequest, GetResponse, KeyMetadata,
@@ -15,7 +17,7 @@ use common::storage::{
 use crc32fast::Hasher;
 use lookup::PartitionLookup;
 use partition::ListOptions;
-use partition::{Key, PutValue, Error as PError};
+use partition::{Key, PutValue};
 use prost_types::Timestamp;
 use rayon::prelude::*;
 use std::time::SystemTime;
@@ -29,7 +31,7 @@ use futures::{FutureExt, TryFutureExt};
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), BoxError> {
     if cfg!(debug_assertions) {
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
@@ -91,7 +93,7 @@ struct NodeStorageServer {
 }
 
 impl NodeStorageServer {
-    fn new(config: impl AsRef<Path>) -> Result<NodeStorageServer, Box<dyn Error>> {
+    fn new(config: impl AsRef<Path>) -> Result<NodeStorageServer, BoxError> {
         let partition_lookup = PartitionLookup::load(config)?; // should move this out
         Ok(NodeStorageServer { partition_lookup })
     }
@@ -264,7 +266,7 @@ impl Storage for NodeStorageServer {
                 });
             }
 
-            Ok::<Vec<KeyMetadata>, PError>(keys)
+            Ok::<Vec<KeyMetadata>, BoxError>(keys)
         });
 
         let mut keys = Vec::new();

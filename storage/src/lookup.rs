@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt::Formatter;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use crate::partition::{Key, Partition, Error as PError};
+use crate::partition::{Key, Partition};
 use dashmap::DashMap;
 use jumphash::{CustomJumpHasher, JumpHasher};
 use tracing::instrument;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Visitor;
 use tracing::info;
 use uuid::Uuid;
+use common::BoxError;
 use common::crc64hasher::Crc64Hasher;
 
 const PARTITION_CONFIG: &str = "partitions.json";
@@ -93,11 +94,11 @@ struct PersistedPartition {
 }
 
 impl PersistedState {
-    fn to_partition_lookup(&self, config_dir: impl AsRef<Path>) -> Result<PartitionLookup, PError> {
+    fn to_partition_lookup(&self, config_dir: impl AsRef<Path>) -> Result<PartitionLookup, BoxError> {
         let config_dir = config_dir.as_ref();
         let mut partitions: DashMap<(Uuid, Uuid), Arc<[Partition]>> = DashMap::new();
         for (key, value) in self.partitions.iter() {
-            let value: Vec<Partition> = value.iter().map(|partition| partition.to_partition(config_dir)).collect::<Result<Vec<Partition>, PError>>()?;
+            let value: Vec<Partition> = value.iter().map(|partition| partition.to_partition(config_dir)).collect::<Result<Vec<Partition>, BoxError>>()?;
 
             partitions.insert(key.into(), value.into());
         }
@@ -111,7 +112,7 @@ impl PersistedState {
 }
 
 impl PersistedPartition {
-    fn to_partition(&self, base_path: impl AsRef<Path>) -> Result<Partition, PError> {
+    fn to_partition(&self, base_path: impl AsRef<Path>) -> Result<Partition, BoxError> {
         Partition::new(
             self.id,
             self.namespace_id,
@@ -147,7 +148,7 @@ impl From<&PartitionLookup> for PersistedState {
 }
 
 impl PartitionLookup {
-    pub fn load(config: impl AsRef<Path>) -> Result<PartitionLookup, Box<dyn Error>> {
+    pub fn load(config: impl AsRef<Path>) -> Result<PartitionLookup, BoxError> {
 
         let config = config.as_ref();
 
